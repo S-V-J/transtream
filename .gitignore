@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+ENV_DIR/
+
+# Django
+*.sqlite3
+db.sqlite3
+media/
+staticfiles/
+collected_static/
+.static_cache/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# Logs
+*.log
+logs/
+
+# OS / editor / WSL artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# Claude Code local memory / private history
+.claude/memory.json
+.claude/memory.archive.json
+.claude/chat-history.json
+.claude/session-cache/
+
+# Audio assets generated during development
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.wma
+
+# Keep source code and docs tracked
+!README.md
+!LICENSE
+!.gitignore
+!prd.md
+!CLAUDE.md
