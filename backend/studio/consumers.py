@@ -1,5 +1,5 @@
 """
-TranStream Studio WebSocket consumer (Phases 2 + 3 + 4 + 5 + 5.5).
+TranStream Studio WebSocket consumer (Phases 2 + 3 + 4 + 5 + 5.5 + 6a-wire).
 
 Ingestion contract (UNCHANGED since Phase 2 — do not alter):
     text  {"type":"start","mime":"audio/webm;codecs=opus"}  -> open temp writer
@@ -10,16 +10,28 @@ Post-stop pipeline (the proven f589bb2 chain):
     saved -> normalizing -> normalized -> vad_started -> vad_complete
           -> transcribing_started -> transcribing_complete
 
-Live rolling preview (Phase 5.5, fully isolated):
+Live rolling preview (Phase 5.5, fully isolated, UNCHANGED):
     Every LIVE_TRANSCRIBE_EVERY_CHUNKS binary frames we:
       1. flush + byte-copy the growing temp file  (thread_sensitive=True, ~1 ms)
       2. FFmpeg-convert the COPY to a complete 16 kHz WAV (subprocess, non-blocking)
       3. Whisper the WAV via NumPy                  (thread_sensitive=False)
       4. emit {"type":"live_transcript_update", ...}
-    Any step failing is swallowed. The preview can NEVER:
-      - block write_chunk (different thread pool)
-      - demux a truncated container (we convert a frozen copy)
-      - survive a Stop/disconnect (generation counter invalidates it)
+    Any step failing is swallowed. The preview can NEVER block write_chunk,
+    demux a truncated container, or survive a Stop/disconnect (generation guard).
+
+Persistence wiring (Phase 6a-wire, NEW — additive & non-fatal):
+    At the moments the pipeline already holds the data, we best-effort write
+    Take + Job + dual Segment rows via studio.persistence. RULES:
+      * UI frames are sent FIRST and UNCONDITIONALLY; persistence runs after,
+        so a DB fault degrades to "not stored", never "transcript hidden".
+      * persistence.* never raises (decorated _best_effort); we still guard
+        every call with `if self._take is not None` (anon user / DB down).
+      * DB writes use thread_sensitive=True (via self._db) because they run
+        AFTER ingestion has finished — nothing left to starve — and serializing
+        SQLite writes on the one sensitive thread avoids "database is locked"
+        when two tabs finalize simultaneously. The HEAVY live-preview whisper
+        stays thread_sensitive=False because it runs DURING recording.
+      * Only authenticated users persist (scope["user"] from AuthMiddlewareStack).
 """
 
 import asyncio
@@ -36,6 +48,7 @@ from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
 
+from studio import persistence
 from studio.audio_service import (
     AudioNormalizationError,
     normalize_audio,
@@ -215,11 +228,12 @@ class SessionWriter:
 
 class AudioConsumer(AsyncWebsocketConsumer):
     """
-    Phase 2+3+4+5+5.5 consumer.
+    Phase 2+3+4+5+5.5+6a-wire consumer.
 
     Sends: connected, started, stats, saved, normalizing, normalized,
            vad_started, vad_complete, transcribing_started,
            transcribing_complete, live_transcript_update, error
+    Persists (best-effort, post-ingestion): Take, Job, Segment(vad|whisper).
     """
 
     # ── lifecycle ──────────────────────────────────────────────────────
@@ -229,7 +243,11 @@ class AudioConsumer(AsyncWebsocketConsumer):
         self.group_name = f"studio_{self.session_id}"
         self.writer = None
 
-        # live-preview isolation state
+        # persistence context (6a-wire)
+        self._user = self.scope.get("user")   # from AuthMiddlewareStack; may be AnonymousUser
+        self._take = None                     # Take instance once created, else None
+
+        # live-preview isolation state (5.5, unchanged)
         self.live_chunk_counter = 0
         self._live_busy = False
         self._live_gen = 0            # generation token; bumped to invalidate in-flight work
@@ -256,6 +274,9 @@ class AudioConsumer(AsyncWebsocketConsumer):
             info = await self.writer.finalize()
             if info["filename"]:
                 logger.info("Saved partial recording on disconnect: %s", info["filename"])
+                # NOTE (6b): partial-on-disconnect is intentionally NOT persisted
+                # nor transcribed here. Phase 6b's recovery sweep will adopt
+                # orphaned raw files (and the .ts_part_* leaks) into queued Jobs.
 
     # ── transport helpers ──────────────────────────────────────────────
 
@@ -265,6 +286,37 @@ class AudioConsumer(AsyncWebsocketConsumer):
             await self.send(text_data=json.dumps(payload))
         except Exception:
             pass
+
+    async def _db(self, fn, *args):
+        """
+        Run a studio.persistence writer (plain sync ORM) on the SENSITIVE thread.
+
+        Safe here because every caller is post-ingestion (recording finished),
+        so there is no binary frame flow to starve — and serializing SQLite
+        writes on one thread prevents "database is locked" across simultaneous
+        finalizes. persistence.* is non-fatal by design, so this never raises.
+        """
+        return await sync_to_async(fn, thread_sensitive=True)(*args)
+
+    async def _create_take_for(self, info):
+        """
+        Best-effort Take+Job creation from a finalized writer's info dict.
+        Returns the Take instance, or None if the user is anonymous / the
+        take had no bytes / the DB is unavailable. Never raises.
+        """
+        if not info.get("filename") or not info.get("path"):
+            return None
+        user = getattr(self, "_user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return None
+        return await self._db(
+            persistence.create_mic_take,
+            user,
+            info["filename"],
+            info["path"],
+            info.get("duration_ms", 0),
+            info.get("mime", ""),
+        )
 
     async def receive(self, text_data=None, bytes_data=None):
         if text_data is not None:
@@ -305,10 +357,11 @@ class AudioConsumer(AsyncWebsocketConsumer):
         )
         await self.writer.open()
 
-        # fresh take => fresh generation, cleared preview gate
+        # fresh take => fresh generation, cleared preview gate, cleared persist ctx
         self._live_gen += 1
         self.live_chunk_counter = 0
         self._live_busy = False
+        self._take = None
 
         await self._safe_send({
             "type": "started",
@@ -330,6 +383,9 @@ class AudioConsumer(AsyncWebsocketConsumer):
         info = await self.writer.finalize()
         self.writer = None
 
+        # ── 6a-wire: create the durable Take + initial Job (non-fatal) ──
+        self._take = await self._create_take_for(info)
+
         await self._safe_send({
             "type": "stats",
             "chunks": info["chunks"],
@@ -347,7 +403,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "message": "Recording stopped, but no audio data was received.",
             })
 
-    # ── post-stop pipeline (PROVEN f589bb2 chain — unchanged semantics) ─
+    # ── post-stop pipeline (PROVEN f589bb2 chain + 6a-wire persistence) ─
 
     async def _run_post_processing(self, raw_path: Path):
         output_path = normalized_output_path(raw_path)
@@ -365,8 +421,13 @@ class AudioConsumer(AsyncWebsocketConsumer):
         try:
             norm_result = await normalize_audio(raw_path, output_path)
             await self._safe_send({"type": "normalized", **norm_result})
+            # ── 6a-wire: record normalized path + advance job (non-fatal) ──
+            if self._take is not None:
+                await self._db(persistence.attach_normalized, self._take, output_path)
         except AudioNormalizationError as exc:
             logger.warning("Normalization failed for %s: %s", raw_path.name, exc)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "normalization", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"Normalization failed: {exc}",
@@ -377,6 +438,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             return
         except Exception as exc:
             logger.exception("Unexpected error during normalization of %s", raw_path.name)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "normalization", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"Normalization error: {exc}",
@@ -405,8 +468,13 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "total_speech_ms": total_speech_ms,
                 "segments": segments,
             })
+            # ── 6a-wire: persist acoustic timeline (idempotent, non-fatal) ──
+            if self._take is not None:
+                await self._db(persistence.save_vad_segments, self._take, segments)
         except VADError as exc:
             logger.warning("VAD failed for %s: %s", wav_path.name, exc)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "vad", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"VAD segmentation failed: {exc}",
@@ -416,6 +484,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             })
         except Exception as exc:
             logger.exception("Unexpected VAD error for %s", wav_path.name)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "vad", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"VAD error: {exc}",
@@ -441,8 +511,19 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "language_probability": result["language_probability"],
                 "segments": result["segments"],
             })
+            # ── 6a-wire: persist linguistic timeline + language, mark DONE ──
+            if self._take is not None:
+                await self._db(
+                    persistence.save_whisper_transcript,
+                    self._take,
+                    result["language"],
+                    result["language_probability"],
+                    result["segments"],
+                )
         except TranscriptionError as exc:
             logger.warning("Transcription failed for %s: %s", wav_path.name, exc)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "transcription", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"Transcription failed: {exc}",
@@ -452,6 +533,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             })
         except Exception as exc:
             logger.exception("Unexpected transcription error for %s", wav_path.name)
+            if self._take is not None:
+                await self._db(persistence.mark_job_failed, self._take, "transcription", str(exc))
             await self._safe_send({
                 "type": "error",
                 "message": f"Transcription error: {exc}",
@@ -460,7 +543,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "normalized_file": wav_path.name,
             })
 
-    # ── live rolling preview (isolated; cannot harm ingestion) ──────────
+    # ── live rolling preview (isolated; unchanged from 5.5; NOT persisted) ─
 
     def _live_interval_chunks(self) -> int:
         """
@@ -487,6 +570,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             self._live_gen += 1                     # kill preview too
             info = await self.writer.finalize()
             self.writer = None
+            # ── 6a-wire: persist the force-saved take too ──
+            self._take = await self._create_take_for(info)
             await self._safe_send({
                 "type": "error",
                 "message": "Maximum recording size reached. Partial audio saved.",
@@ -498,7 +583,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
 
         await self.writer.write_chunk(data)
 
-        # ── preview trigger: gated, non-blocking, single-flight ──
+        # ── preview trigger: gated, non-blocking, single-flight (unchanged) ──
         interval = self._live_interval_chunks()
         if (
             interval > 0
@@ -528,12 +613,13 @@ class AudioConsumer(AsyncWebsocketConsumer):
         """
         snapshot copy -> FFmpeg (subprocess) -> Whisper (NumPy) -> emit.
 
-        Invariants enforced here:
+        Invariants enforced here (UNCHANGED from 5.5):
           * heavy inference on thread_sensitive=False  (NOT the write thread)
           * only the 1 ms flush/copy on thread_sensitive=True
           * every artifact deleted in finally
           * result dropped if the generation changed (Stop/disconnect/new take)
           * ANY exception is swallowed -> worst case = no preview text
+          * the preview is EPHEMERAL: it is never persisted to the DB.
         """
         snap_path = None
         live_wav_path = None
