@@ -315,6 +315,18 @@ def main():
     })
     if not check("S1", "login POST -> 302 (redirect, not 200 re-render)", st == 302,
                  f"status={st} location={hdr(h, 'Location')} body={b[:120]!r}"):
+        # A 200 here means LoginView re-rendered the form, i.e. it rejected the
+        # credentials - but the REASON lives in the HTML body, and the assertion
+        # detail truncates to 120 bytes of <head>. Dump the whole body so the
+        # server's own words ("Please enter a correct username and password" vs
+        # anything else) are available instead of a status code plus a guess.
+        # The 23:56 run cost a full cycle to a bare status=200; this is why.
+        pathlib.Path("/tmp/ts_login_body.html").write_bytes(b)
+        print(f"    >> login body captured to /tmp/ts_login_body.html "
+              f"({len(b):,} bytes). Django's form errors render inside it:")
+        for m in re.finditer(r"<ul[^>]*>(.*?)</ul>", b.decode("utf-8", "replace"), re.S):
+            for li in re.findall(r"<li>(.*?)</li>", m.group(1), re.S):
+                print("    >> FORM ERROR:", re.sub(r"<[^>]+>", "", li).strip())
         return finish()
     cookie_csrf = next((ck.value for ck in c.jar if ck.name == "csrftoken"), None)
     # H4 depends on this: finish() revokes every minted key on EVERY exit
