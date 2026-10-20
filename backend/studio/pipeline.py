@@ -150,6 +150,32 @@ def process_take(take: Take, worker_id: str = "pipeline") -> bool:
     try:
         norm_meta = _normalize_via_audio_service(raw_path, norm_path)
         persistence.attach_normalized(take, norm_path)
+
+        # Phase 7 backfill: an upload creates its Take with duration_ms=0
+        # because nothing has decoded the file at enqueue time. The
+        # normalizer just measured the real duration, so record it now —
+        # this is what the UI/API show as the take length.
+        #
+        # Gated on "currently unset" (0/None) so the microphone path's
+        # writer-derived duration is NEVER clobbered. The live hot path is
+        # therefore provably inert to this block: for a mic take the gate is
+        # false and not a single extra statement executes.
+        try:
+            measured = int((norm_meta or {}).get("duration_ms") or 0)
+            if measured > 0 and not take.duration_ms:
+                take.duration_ms = measured
+                take.save(update_fields=["duration_ms", "updated_at"])
+                logger.info(
+                    "process_take [%s] stage 1 backfilled duration_ms=%d",
+                    take_id, measured,
+                )
+        except Exception as exc:
+            # Purely cosmetic: a failed backfill must never fail the job.
+            # The transcript is complete and correct either way.
+            logger.warning(
+                "process_take [%s] stage 1 duration backfill skipped: %s",
+                take_id, exc,
+            )
         logger.info(
             "process_take [%s] stage 1 OK - normalized -> %s (%s)",
             take_id, norm_path.name,

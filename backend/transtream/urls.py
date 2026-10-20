@@ -1,3 +1,21 @@
+"""
+TranStream project URL configuration.
+
+Route map:
+  /                    → root_redirect (auth-gated)
+  /admin/              → Django admin
+  /accounts/login/     → LoginView
+  /accounts/logout/    → LogoutView
+  /studio/             → Studio page (mic + upload UI)
+  /studio/upload/      → POST multipart upload (Phase 7)
+  /settings/           → Settings page
+  /account/            → Account page (Phase 8: API key management)
+  /about/              → About page
+  /api/v1/…            → Public API (Phase 8, bearer-key authenticated)
+  /media/…             → Media files (DEBUG only)
+  /static/…            → Static files (DEBUG only)
+"""
+
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
@@ -29,7 +47,11 @@ urlpatterns = [
         name="logout",
     ),
 
-    # App pages
+    # Public API (Phase 8) — mounted BEFORE the app catch-all so
+    # /api/v1/… is never swallowed by studio.urls.
+    path("api/v1/", include("studio.api_urls")),
+
+    # App pages (studio, settings, account, about, upload)
     path("", include("studio.urls")),
 ]
 

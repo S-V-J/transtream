@@ -1,10 +1,24 @@
-// ─── TranStream Studio recorder component (Phases 2 + 3 + 4 + 5 + 5.5) ────
+// ─── TranStream Studio recorder component (Phases 2 + 3 + 4 + 5 + 5.5 + 7) ──
 //
-// Browser mic → MediaRecorder 100 ms slices → WebSocket binary frames
-// → Django Channels AudioConsumer → incremental temp file → raw recording
-// → FFmpeg normalization → 16 kHz mono PCM WAV
-// → Silero VAD segments → Faster-Whisper transcript.
-// + live rolling preview ("live_transcript_update") while recording.
+// Mic path (unchanged, proven green since 63fd646):
+//   Browser mic → MediaRecorder 100 ms slices → WebSocket binary frames
+//   → Django Channels AudioConsumer → incremental temp file → raw recording
+//   → FFmpeg normalization → 16 kHz mono PCM WAV
+//   → Silero VAD segments → Faster-Whisper transcript
+//   + live rolling preview ("live_transcript_update") while recording.
+//
+// Upload path (Phase 7, NEW, fully independent):
+//   <input type=file> / drag-drop → XHR POST /studio/upload/ (byte progress)
+//   → 202 {job_id} → poll /studio/jobs/<id>/ (pipeline progress from the
+//   background worker) → /studio/jobs/<id>/transcript/ → render.
+//
+// Isolation rule: the upload path reads ONLY the pure formatters
+// (fmtTime / fmtSegTime / fmtBytes / fmtSampleRate / _errMessage /
+// _csrfToken) and writes ONLY into `this.upload.*`. It never touches
+// transcriptSegments, vadSegments, saved, normalized, liveTranscriptText or
+// any WebSocket/mic flag. An upload finishing mid-recording therefore cannot
+// overwrite a mic result — the two timelines are disjoint by construction,
+// mirroring how the VAD and Whisper timelines are kept disjoint in the DB.
 //
 // Ordering guarantee (Phase 2, unchanged): every slice is pushed through a
 // serialized promise queue so binary frames reach the server in capture
@@ -62,9 +76,33 @@ document.addEventListener('alpine:init', () => {
     _startTs: 0,
     _mime: '',
 
+    // ── Phase 7: file upload (own namespace; see isolation rule above) ──
+    upload: {
+      file: null,
+      name: '',
+      size: 0,
+      dragOver: false,
+      uploading: false,   // POST in flight (amber bar)
+      progress: 0,        // 0..100 bytes sent to the server
+      jobId: null,
+      takeId: null,
+      state: '',          // queued|normalizing|segmenting|transcribing|done|failed|cancelled
+      pct: 0,             // 0..100 server-side pipeline progress (emerald bar)
+      error: null,
+      code: '',
+      segments: [],
+      language: '',
+      languageProbability: 0,
+      durationMs: 0,
+      polling: false,
+      _timer: null,
+      _deadline: 0,
+    },
+
     // ── Alpine lifecycle ──
 
     destroy() {
+      this.stopUploadPolling();
       if (this.recording) {
         try { this.stop(); } catch (e) { /* ignore */ }
       }
@@ -328,6 +366,240 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── Phase 7: upload controls ────────────────────────────────────────
+
+    pickUploadFile() {
+      const el = document.getElementById('ts-upload-input');
+      if (el) el.click();
+    },
+
+    onUploadFileChosen(e) {
+      const f = e.target.files && e.target.files[0];
+      if (f) this.setUploadFile(f);
+      // Reset so choosing the same file again still fires a change event.
+      e.target.value = '';
+    },
+
+    onUploadDragOver(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.upload.dragOver = true;
+    },
+
+    onUploadDragLeave(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.upload.dragOver = false;
+    },
+
+    onUploadDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.upload.dragOver = false;
+      const dt = e.dataTransfer;
+      const f = dt && dt.files && dt.files[0];
+      if (f) this.setUploadFile(f);
+    },
+
+    setUploadFile(f) {
+      this.stopUploadPolling();
+      const u = this.upload;
+      u.file = f;
+      u.name = f.name || 'upload';
+      u.size = f.size || 0;
+      u.uploading = false;
+      u.progress = 0;
+      u.jobId = null;
+      u.takeId = null;
+      u.state = '';
+      u.pct = 0;
+      u.error = null;
+      u.code = '';
+      u.segments = [];
+      u.language = '';
+      u.languageProbability = 0;
+      u.durationMs = 0;
+    },
+
+    clearUpload() {
+      this.stopUploadPolling();
+      const u = this.upload;
+      u.file = null; u.name = ''; u.size = 0; u.dragOver = false;
+      u.uploading = false; u.progress = 0;
+      u.jobId = null; u.takeId = null;
+      u.state = ''; u.pct = 0; u.error = null; u.code = '';
+      u.segments = []; u.language = ''; u.languageProbability = 0; u.durationMs = 0;
+    },
+
+    async startUpload() {
+      const u = this.upload;
+      if (!u.file || u.uploading || u.polling) return;
+
+      u.error = null; u.code = '';
+      u.segments = []; u.language = ''; u.languageProbability = 0; u.durationMs = 0;
+      u.progress = 0; u.pct = 0; u.state = 'uploading';
+      u.uploading = true;
+
+      const form = new FormData();
+      form.append('file', u.file, u.name);
+
+      try {
+        const res = await this._xhrUpload('/studio/upload/', form, (pct) => { u.progress = pct; });
+        if (!res.ok) {
+          u.state = '';
+          u.error = res.body.error || ('Upload failed (HTTP ' + res.status + ').');
+          u.code = res.body.code || '';
+          return;
+        }
+        u.jobId = res.body.job_id || null;
+        u.takeId = res.body.take_id || null;
+        u.state = res.body.status || 'queued';
+        u.pct = 0;
+        if (!u.jobId) {
+          u.error = 'Server accepted the file but returned no job id.';
+          return;
+        }
+        this.startUploadPolling();
+      } catch (err) {
+        u.state = '';
+        u.error = 'Network error during upload: ' + this._errMessage(err);
+      } finally {
+        u.uploading = false;
+      }
+    },
+
+    // XHR rather than fetch: fetch exposes no upload-progress event, and a
+    // 100 MB local upload with no byte counter is indistinguishable from a
+    // hang. Timeout is generous (2 min) but finite, so a dead socket cannot
+    // wedge the panel forever.
+    _xhrUpload(url, form, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url, true);
+        xhr.setRequestHeader('X-CSRFToken', this._csrfToken());
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.timeout = 120000;
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+        };
+        xhr.onload = () => {
+          let body = {};
+          try { body = JSON.parse(xhr.responseText); } catch (e) { /* non-JSON */ }
+          resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, body });
+        };
+        xhr.onerror = () => reject(new Error('network error'));
+        xhr.ontimeout = () => reject(new Error('upload timed out after 120s'));
+        xhr.send(form);
+      });
+    },
+
+    startUploadPolling() {
+      const u = this.upload;
+      if (!u.jobId) return;
+      this.stopUploadPolling();
+      u.polling = true;
+      // 20-minute ceiling: a long take on a slow CPU can legitimately take
+      // minutes of Whisper, but never 20 hours. On expiry we stop the timer
+      // and say so, rather than spinning silently forever.
+      u._deadline = Date.now() + 20 * 60 * 1000;
+
+      const tick = async () => {
+        if (!this.upload.polling) return;
+        try {
+          const resp = await fetch('/studio/jobs/' + u.jobId + '/', {
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!resp.ok) throw new Error('HTTP ' + resp.status);
+          const d = await resp.json();
+
+          u.state = d.state || u.state;
+          u.pct = d.progress_pct || 0;
+
+          if (d.state === 'done') {
+            this.stopUploadPolling();
+            await this.fetchUploadTranscript();
+            return;
+          }
+          if (d.state === 'failed') {
+            this.stopUploadPolling();
+            u.error = d.last_error || 'Transcription failed. See /admin/studio/job/.';
+            return;
+          }
+          if (d.state === 'cancelled') {
+            this.stopUploadPolling();
+            u.error = 'Job was cancelled.';
+            return;
+          }
+          if (Date.now() > u._deadline) {
+            this.stopUploadPolling();
+            u.error = 'Still ' + (d.state || 'processing') + ' after 20 minutes. '
+              + 'Is the worker running? (cd backend && python manage.py tsworker)';
+            return;
+          }
+          u._timer = setTimeout(tick, 1500);
+        } catch (err) {
+          // Transient poll failure (server restart, blip): back off and retry
+          // rather than killing the loop. Only give up past the deadline.
+          if (Date.now() > u._deadline) {
+            this.stopUploadPolling();
+            u.error = 'Polling failed: ' + this._errMessage(err);
+            return;
+          }
+          u._timer = setTimeout(tick, 3000);
+        }
+      };
+
+      u._timer = setTimeout(tick, 800);
+    },
+
+    stopUploadPolling() {
+      const u = this.upload;
+      if (u._timer) { clearTimeout(u._timer); u._timer = null; }
+      u.polling = false;
+    },
+
+    async fetchUploadTranscript() {
+      const u = this.upload;
+      try {
+        const resp = await fetch('/studio/jobs/' + u.jobId + '/transcript/', {
+          headers: { 'Accept': 'application/json' },
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const d = await resp.json();
+        u.segments = Array.isArray(d.segments) ? d.segments : [];
+        u.language = d.language ? String(d.language).toUpperCase() : '';
+        u.languageProbability = d.language_probability || 0;
+        u.durationMs = d.duration_ms || 0;
+      } catch (err) {
+        u.error = 'Transcript fetch failed: ' + this._errMessage(err);
+      }
+    },
+
+    uploadStatusLabel() {
+      const u = this.upload;
+      if (u.uploading) return 'Uploading\u2026 ' + u.progress + '%';
+      if (u.polling) {
+        const names = {
+          queued: 'Queued (waiting for worker)',
+          normalizing: 'Normalizing (FFmpeg)\u2026',
+          segmenting: 'Detecting speech (Silero VAD)\u2026',
+          transcribing: 'Transcribing (Faster-Whisper)\u2026',
+        };
+        const base = names[u.state] || (u.state || 'Processing');
+        return u.pct ? base + ' ' + u.pct + '%' : base;
+      }
+      if (u.state === 'done') return 'Complete';
+      if (u.state === 'failed') return 'Failed';
+      if (u.state === 'cancelled') return 'Cancelled';
+      if (u.file) return 'Ready to upload';
+      return 'No file selected';
+    },
+
+    _csrfToken() {
+      const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    },
+
     // ── helpers ──
 
     _newSessionId() {
@@ -412,6 +684,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     // Full pipeline still running?
+    // NOTE: deliberately excludes upload state. Uploading is an HTTP POST and
+    // the worker's queue is independent of the mic, so a user may legitimately
+    // record while an upload transcribes. pipelineBusy() gates the MIC controls
+    // only.
     pipelineBusy() {
       return this.connecting || this.recording || this.normalizing || this.vadRunning || this.transcribing;
     },

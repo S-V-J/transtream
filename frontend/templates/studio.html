@@ -15,7 +15,7 @@
     <button
       type="button"
       disabled
-      title="Workspace file manager arrives in Phase 8"
+      title="Workspace file manager arrives in Phase 9"
       class="mb-4 w-full cursor-not-allowed rounded-xl border border-white/10 bg-slate-800/50 px-3 py-2 text-left text-sm text-slate-500"
     >
       📂 Open File System
@@ -96,7 +96,7 @@
           type="button"
           @click="nativeScript = !nativeScript"
           disabled
-          title="Native script toggle arrives in Phase 6"
+          title="Native script toggle arrives in Phase 9"
           class="cursor-not-allowed rounded-full border border-cyan-400/20 bg-cyan-500/5 px-3 py-1 text-xs font-medium text-cyan-700"
         >
           ✨ View Native Script
@@ -177,7 +177,8 @@
         <div class="space-y-3">
           <p class="text-slate-300">TranStream Studio is ready.</p>
           <p class="text-slate-500">
-            Click <span class="text-emerald-300">🎤 Start</span> to capture microphone audio.
+            Click <span class="text-emerald-300">🎤 Start</span> to capture microphone audio,
+            or <span class="text-cyan-300">📤 Upload</span> an audio file to transcribe it.
             Pipeline: record → save raw → FFmpeg normalize → Silero VAD → Faster-Whisper transcription.
             Live preview streams while you speak.
           </p>
@@ -385,14 +386,152 @@
               class="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
         ⏹️ Stop
       </button>
-      <button type="button" disabled title="Metadata/workspace save arrives in Phase 8/9"
+      <button type="button" @click="pickUploadFile()"
+              class="rounded-xl bg-cyan-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-600">
+        📤 Upload
+      </button>
+      <button type="button" disabled title="Metadata/workspace save arrives in Phase 9"
               class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
         💾 Save
       </button>
-      <button type="button" disabled title="Upload pipeline arrives in Phase 9"
-              class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
-        📤 Upload
-      </button>
+    </div>
+
+    <!-- ── Phase 7: File Upload panel ──
+         Completely independent of the mic canvas above: reads only the pure
+         formatters, writes only into `upload.*`. An upload can therefore run
+         while a mic take is in flight without either clobbering the other. -->
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h3 class="text-sm font-semibold text-cyan-300">Upload Audio File</h3>
+        <span class="text-xs text-slate-500" x-text="uploadStatusLabel()">No file selected</span>
+      </div>
+
+      <input id="ts-upload-input" type="file" class="hidden"
+             accept=".mp3,.wav,.m4a,.flac,.ogg,.aac,.wma,.webm"
+             @change="onUploadFileChosen($event)" />
+
+      <!-- Drop zone -->
+      <div
+        @dragover="onUploadDragOver($event)"
+        @dragleave="onUploadDragLeave($event)"
+        @drop="onUploadDrop($event)"
+        @click="if (!upload.file) pickUploadFile()"
+        class="cursor-pointer rounded-xl border-2 border-dashed px-4 py-6 text-center transition"
+        :class="upload.dragOver ? 'border-cyan-400 bg-cyan-500/10'
+                              : 'border-white/15 bg-slate-950/40 hover:border-cyan-500/50'"
+      >
+        <template x-if="!upload.file">
+          <div>
+            <p class="text-sm text-slate-300">Drop an audio file here, or click to browse.</p>
+            <p class="mt-1 text-xs text-slate-500">
+              .mp3 · .wav · .m4a · .flac · .ogg · .aac · .wma · .webm — up to 100 MB
+            </p>
+          </div>
+        </template>
+        <template x-if="upload.file">
+          <div>
+            <p class="break-all font-mono text-sm text-cyan-200" x-text="upload.name"></p>
+            <p class="mt-1 text-xs text-slate-500">
+              <span x-text="fmtBytes(upload.size)"></span>
+              <span x-show="upload.takeId" class="ml-2 font-mono text-slate-600"
+                    x-text="'take ' + (upload.takeId || '').slice(0, 8)"></span>
+            </p>
+          </div>
+        </template>
+      </div>
+
+      <!-- Dual progress: amber = bytes to server, emerald = worker pipeline -->
+      <div class="mt-3 space-y-2">
+        <div x-show="upload.uploading" x-cloak>
+          <div class="mb-1 flex justify-between text-[11px] text-slate-500">
+            <span>Bytes to server</span><span x-text="upload.progress + '%'"></span>
+          </div>
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div class="h-full rounded-full bg-amber-400 transition-all duration-150"
+                 :style="'width:' + upload.progress + '%'"></div>
+          </div>
+        </div>
+
+        <div x-show="upload.polling" x-cloak>
+          <div class="mb-1 flex justify-between text-[11px] text-slate-500">
+            <span>Background worker</span><span x-text="upload.pct + '%'"></span>
+          </div>
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div class="h-full rounded-full bg-emerald-400 transition-all duration-300"
+                 :style="'width:' + upload.pct + '%'"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Upload error -->
+      <div x-show="upload.error" x-cloak
+           class="mt-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+        <span x-show="upload.code" class="mr-1 font-mono text-rose-400"
+              x-text="'[' + upload.code + ']'"></span>
+        <span class="break-all" x-text="upload.error"></span>
+      </div>
+
+      <!-- Actions -->
+      <div class="mt-3 flex flex-wrap gap-2">
+        <button type="button" @click="startUpload()"
+                :disabled="!upload.file || upload.uploading || upload.polling"
+                class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
+          ⬆️ Upload &amp; Transcribe
+        </button>
+        <button type="button" @click="clearUpload()"
+                class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
+          Clear
+        </button>
+
+        <template x-if="upload.state === 'done' && upload.jobId">
+          <div class="flex flex-wrap gap-2">
+            <a :href="'/studio/jobs/' + upload.jobId + '/transcript/?format=srt'"
+               class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
+              ⬇️ .srt
+            </a>
+            <a :href="'/studio/jobs/' + upload.jobId + '/transcript/?format=vtt'"
+               class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
+              ⬇️ .vtt
+            </a>
+            <a :href="'/studio/jobs/' + upload.jobId + '/transcript/?format=txt'"
+               class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
+              ⬇️ .txt
+            </a>
+          </div>
+        </template>
+      </div>
+
+      <!-- Result -->
+      <template x-if="upload.segments.length > 0">
+        <div class="mt-4 border-t border-white/10 pt-3">
+          <p class="text-sm text-emerald-300">
+            ✓ Transcription complete
+            <span x-show="upload.language" class="text-slate-500">
+              · language <span class="font-mono text-cyan-300" x-text="upload.language"></span>
+              <span x-show="upload.languageProbability > 0"
+                    x-text="'(' + Math.round(upload.languageProbability * 100) + '%)'"></span>
+            </span>
+            · <span x-text="fmtTime(upload.durationMs)"></span>
+            · <span x-text="upload.segments.length"></span> seg
+          </p>
+          <div class="mt-2 space-y-2">
+            <template x-for="seg in upload.segments" :key="seg.index">
+              <div class="flex items-start gap-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 px-3 py-2 text-sm">
+                <span class="mt-0.5 shrink-0 font-mono text-xs text-cyan-400"
+                      x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
+                <span class="text-slate-100" x-text="seg.text"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <p class="mt-3 text-[11px] text-slate-600">
+        Uploads are processed by the background worker
+        (<code class="text-slate-500">python manage.py tsworker</code>), not by the
+        web server — so a status stuck at “Queued” means the worker is not running,
+        not that the upload failed.
+      </p>
     </div>
 
     <!-- Translation / TTS Placeholder -->
@@ -404,21 +543,21 @@
           <option>English</option><option>French</option><option>Spanish</option><option>German</option>
           <option>Hindi</option><option>Arabic</option><option>Chinese</option><option>Japanese</option>
         </select>
-        <button type="button" disabled title="Argos Translate arrives in Phase 6"
+        <button type="button" disabled title="Argos Translate arrives in Phase 9"
                 class="cursor-not-allowed rounded-xl bg-indigo-700/40 px-3 py-2 text-sm font-semibold text-indigo-200/60">
           🔀 Translate
         </button>
-        <button type="button" disabled title="Playback controls arrive in Phase 7"
+        <button type="button" disabled title="Playback controls arrive in Phase 9"
                 class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
           🔊 Play Audio
         </button>
-        <button type="button" disabled title="Piper TTS voice avatars arrive in Phase 7"
+        <button type="button" disabled title="Piper TTS voice avatars arrive in Phase 9"
                 class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
           🤖 Play Voice Avatar
         </button>
       </div>
       <p class="mt-3 text-xs text-slate-500">
-        Translation and TTS controls are intentionally disabled until Phase 6/7.
+        Translation and TTS controls are intentionally disabled until Phase 9.
       </p>
     </div>
 
