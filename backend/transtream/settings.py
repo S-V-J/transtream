@@ -22,22 +22,13 @@ ALLOWED_HOSTS = [
 ]
 
 # Default local development CSRF origins.
-# The transtream CLI will override this dynamically for the selected port.
+# The transtream CLI also injects the exact selected port dynamically.
+_DEV_PORTS = tuple(range(8000, 8011)) + (8080,)
+
 _DEFAULT_CSRF_ORIGINS = ",".join(
-    [
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://[::1]:8000",
-        "http://localhost:8001",
-        "http://127.0.0.1:8001",
-        "http://[::1]:8001",
-        "http://localhost:8002",
-        "http://127.0.0.1:8002",
-        "http://[::1]:8002",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-        "http://[::1]:8080",
-    ]
+    f"http://{host}:{port}"
+    for port in _DEV_PORTS
+    for host in ("localhost", "127.0.0.1", "[::1]")
 )
 
 CSRF_TRUSTED_ORIGINS = [
@@ -126,9 +117,20 @@ STATICFILES_DIRS = [REPO_ROOT / "frontend" / "static"]
 MEDIA_URL = "media/"
 MEDIA_ROOT = REPO_ROOT / "media"
 
+# ─── TranStream Studio Storage ─────────────────────────────────────────────
+RECORDINGS_DIR = MEDIA_ROOT / "recordings"
+
+# Maximum raw audio accepted for one take before backend force-saves and stops.
+# 512 MB is generous for local development and long raw captures.
+STUDIO_MAX_TAKE_BYTES = 512 * 1024 * 1024
+
+# Send live stats to browser every N received binary chunks.
+# With 100 ms chunks, 20 chunks ≈ 2 seconds.
+STUDIO_STATS_EVERY_CHUNKS = 20
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# ─── Authentication ───────────────────────────────────────────────────────
+# ─── Authentication ────────────────────────────────────────────────────────
 LOGIN_URL = "/accounts/login/"
 LOGIN_REDIRECT_URL = "/studio/"
 LOGOUT_REDIRECT_URL = "/accounts/login/"

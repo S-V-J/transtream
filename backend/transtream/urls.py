@@ -1,5 +1,8 @@
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.auth import views as auth_views
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import include, path
 
 from studio import views
@@ -26,6 +29,12 @@ urlpatterns = [
         name="logout",
     ),
 
-    # App pages (all login_required)
+    # App pages
     path("", include("studio.urls")),
 ]
+
+# Local development static/media serving.
+# This is required because Daphne does not serve static/media automatically.
+if settings.DEBUG:
+    urlpatterns += staticfiles_urlpatterns()
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
