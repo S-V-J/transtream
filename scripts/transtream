@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── TranStream CLI Management Script ───────────────────────────────────────
-# Usage:
-#   transtream start       Start Redis (if needed) + Daphne ASGI server
-#   transtream stop        Stop Daphne (and Redis if we started it)
-#   transtream restart     Stop then start
-#   transtream status      Show running processes and port bindings
-#   transtream logs        Tail application logs
-#   transtream enable      Install systemd user service for auto-start
+# ─── TranStream CLI — Dynamic Port Edition ──────────────────────────────────
+#
+#   transtream start       Find free port → start Redis (if needed) → Daphne
+#   transtream stop        Stop Daphne (and Redis only if we started it)
+#   transtream restart     Stop → start
+#   transtream status      Show port, PIDs, bindings, auto-run state
+#   transtream logs        Tail daphne.log + redis.log
+#   transtream enable      Install systemd user service (auto-run on login)
 #   transtream disable     Remove systemd user service
 #   transtream help        Show this help
 #
-# Default behavior:
-#   NO auto-run. The app only runs when you explicitly start it.
+# Rules:
+#   • NEVER kills a process it did not start.
+#   • Default preferred port: 8000 (override: TRANSTREAM_PORT=NNNN).
+#   • If preferred port is busy, scans upward until a free port is found.
+#   • Chosen port is saved to logs/transtream.port for stop/status.
+#   • No auto-run by default. enable/disable is opt-in.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -24,10 +28,11 @@ BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$LOG_DIR/daphne.pid"
 REDIS_PID_FILE="$LOG_DIR/redis.pid"
+PORT_FILE="$LOG_DIR/transtream.port"
 
-REDIS_PORT="${TRANSTREAM_REDIS_PORT:-6379}"
+PREFERRED_PORT="${TRANSTREAM_PORT:-8000}"
 APP_HOST="${TRANSTREAM_HOST:-127.0.0.1}"
-APP_PORT="${TRANSTREAM_PORT:-8000}"
+REDIS_PORT="${TRANSTREAM_REDIS_PORT:-6379}"
 
 SERVICE_NAME="transtream"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
@@ -44,6 +49,63 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+# ─── Port helpers ───────────────────────────────────────────────────────────
+
+port_in_use() {
+    # Returns 0 (true) if something is listening on $1
+    python3 -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(0.3)
+r = s.connect_ex(('127.0.0.1', int(sys.argv[1])))
+s.close()
+sys.exit(0 if r == 0 else 1)
+" "$1" 2>/dev/null
+}
+
+find_free_port() {
+    local start="$1"
+    local port="$start"
+    local limit=$((start + 200))
+
+    while [ "$port" -lt "$limit" ]; do
+        if ! port_in_use "$port"; then
+            echo "$port"
+            return 0
+        fi
+        port=$((port + 1))
+    done
+
+    return 1
+}
+
+resolve_port() {
+    # If a previous run saved a port and it's still ours, reuse it.
+    # Otherwise find a new free port starting from PREFERRED_PORT.
+
+    if [ -f "$PORT_FILE" ]; then
+        local saved
+        saved=$(cat "$PORT_FILE" 2>/dev/null || echo "")
+        if [ -n "$saved" ] && [ "$saved" -eq "$saved" ] 2>/dev/null; then
+            if ! port_in_use "$saved"; then
+                echo "$saved"
+                return 0
+            fi
+            # Saved port now busy (foreign process grabbed it) → find new
+            warn "Saved port $saved is now occupied. Scanning for a new free port..."
+        fi
+    fi
+
+    local found
+    found=$(find_free_port "$PREFERRED_PORT") || {
+        err "No free port found in range $PREFERRED_PORT–$((PREFERRED_PORT + 200))."
+        exit 1
+    }
+    echo "$found"
+}
+
+# ─── Directory / venv ──────────────────────────────────────────────────────
+
 ensure_dirs() {
     mkdir -p "$LOG_DIR"
 }
@@ -51,13 +113,13 @@ ensure_dirs() {
 activate_venv() {
     if [ ! -d "$VENV_DIR" ]; then
         err "Virtual environment not found at $VENV_DIR"
-        err "Create it with: python3 -m venv venv"
         exit 1
     fi
-
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
 }
+
+# ─── Redis ─────────────────────────────────────────────────────────────────
 
 redis_is_running() {
     redis-cli -p "$REDIS_PORT" ping >/dev/null 2>&1
@@ -70,7 +132,6 @@ start_redis_if_needed() {
     fi
 
     info "Starting Redis on port $REDIS_PORT..."
-
     redis-server \
         --daemonize yes \
         --port "$REDIS_PORT" \
@@ -95,19 +156,19 @@ stop_redis_if_we_started() {
     if [ -f "$REDIS_PID_FILE" ]; then
         local pid
         pid=$(cat "$REDIS_PID_FILE")
-
         if kill -0 "$pid" 2>/dev/null; then
             info "Stopping Redis (PID: $pid)..."
             kill "$pid" 2>/dev/null || true
             sleep 1
             ok "Redis stopped"
         fi
-
         rm -f "$REDIS_PID_FILE"
     else
         warn "Redis was not started by this script. Leaving it alone."
     fi
 }
+
+# ─── Daphne ────────────────────────────────────────────────────────────────
 
 daphne_is_running() {
     if [ -f "$PID_FILE" ]; then
@@ -115,7 +176,6 @@ daphne_is_running() {
         pid=$(cat "$PID_FILE")
         kill -0 "$pid" 2>/dev/null && return 0
     fi
-
     return 1
 }
 
@@ -126,19 +186,21 @@ start_daphne() {
     fi
 
     if [ ! -f "$BACKEND_DIR/manage.py" ]; then
-        err "backend/manage.py not found at $BACKEND_DIR/manage.py"
-        err "Create the Django project before starting TranStream."
+        err "backend/manage.py not found. Create the Django project first."
         exit 1
     fi
 
     activate_venv
     ensure_dirs
 
-    info "Starting Daphne ASGI server on http://$APP_HOST:$APP_PORT ..."
+    local port
+    port=$(resolve_port)
+    echo "$port" > "$PORT_FILE"
 
+    info "Starting Daphne ASGI server on http://$APP_HOST:$port ..."
     cd "$BACKEND_DIR"
 
-    nohup daphne -b "$APP_HOST" -p "$APP_PORT" \
+    nohup daphne -b "$APP_HOST" -p "$port" \
         transtream.asgi:application \
         >> "$LOG_DIR/daphne.log" 2>&1 &
 
@@ -148,24 +210,25 @@ start_daphne() {
     sleep 2
 
     if kill -0 "$pid" 2>/dev/null; then
-        ok "Daphne started (PID: $pid)"
-        info "Access: http://localhost:$APP_PORT/"
+        ok "Daphne started (PID: $pid, port: $port)"
+        info "Access: http://localhost:$port/"
     else
-        err "Daphne failed to start. Check $LOG_DIR/daphne.log"
+        err "Daphne failed to start. Last 30 lines of log:"
         tail -n 30 "$LOG_DIR/daphne.log" >&2 || true
-        rm -f "$PID_FILE"
+        rm -f "$PID_FILE" "$PORT_FILE"
         exit 1
     fi
 }
 
 stop_daphne() {
+    # Also stop systemd user service if active
     if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         info "Stopping systemd user service $SERVICE_NAME..."
         systemctl --user stop "$SERVICE_NAME" || true
     fi
 
     if ! daphne_is_running; then
-        warn "Daphne is not running."
+        warn "Daphne is not running (no valid PID file)."
         rm -f "$PID_FILE"
         return 0
     fi
@@ -178,7 +241,7 @@ stop_daphne() {
     sleep 2
 
     if kill -0 "$pid" 2>/dev/null; then
-        warn "Force killing Daphne..."
+        warn "Force killing Daphne (PID: $pid)..."
         kill -9 "$pid" 2>/dev/null || true
     fi
 
@@ -186,11 +249,12 @@ stop_daphne() {
     ok "Daphne stopped"
 }
 
+# ─── Commands ──────────────────────────────────────────────────────────────
+
 cmd_start() {
     ensure_dirs
     start_redis_if_needed
     start_daphne
-
     echo ""
     ok "TranStream is running."
     info "Logs: $LOG_DIR/"
@@ -199,7 +263,6 @@ cmd_start() {
 cmd_stop() {
     stop_daphne
     stop_redis_if_we_started
-
     echo ""
     ok "TranStream stopped."
 }
@@ -211,39 +274,41 @@ cmd_restart() {
 }
 
 cmd_status() {
+    local port="?"
+    [ -f "$PORT_FILE" ] && port=$(cat "$PORT_FILE")
+
     echo "─────────────────────────────────────────"
     echo " TranStream Status"
     echo "─────────────────────────────────────────"
-    info "Project dir: $PROJECT_DIR"
-    info "App URL:     http://$APP_HOST:$APP_PORT/"
-    info "Redis port:  $REDIS_PORT"
-
+    info "Project dir : $PROJECT_DIR"
+    info "App URL     : http://$APP_HOST:$port/"
+    info "Redis port  : $REDIS_PORT"
     echo ""
 
     if redis_is_running; then
-        ok "Redis: RUNNING on port $REDIS_PORT"
+        ok "Redis  : RUNNING on port $REDIS_PORT"
     else
-        err "Redis: NOT RUNNING"
+        err "Redis  : NOT RUNNING"
     fi
 
     if daphne_is_running; then
-        ok "Daphne: RUNNING (PID: $(cat "$PID_FILE"))"
+        ok "Daphne : RUNNING (PID: $(cat "$PID_FILE"), port: $port)"
     else
-        warn "Daphne: NOT RUNNING"
+        warn "Daphne : NOT RUNNING"
     fi
 
     echo ""
-    info "Port $APP_PORT binding:"
-    ss -ltnp 2>/dev/null | grep ":$APP_PORT " || echo "  (none)"
+    info "Port $port binding:"
+    ss -ltnp 2>/dev/null | grep ":${port} " || echo "  (none)"
 
     info "Port $REDIS_PORT binding:"
-    ss -ltnp 2>/dev/null | grep ":$REDIS_PORT " || echo "  (none)"
+    ss -ltnp 2>/dev/null | grep ":${REDIS_PORT} " || echo "  (none)"
 
     echo ""
     if systemctl --user is-enabled "$SERVICE_NAME" 2>/dev/null; then
-        ok "Auto-run systemd user service: ENABLED"
+        ok "Auto-run (systemd user service): ENABLED"
     else
-        info "Auto-run systemd user service: DISABLED (default)"
+        info "Auto-run (systemd user service): DISABLED (default)"
     fi
 
     echo "─────────────────────────────────────────"
@@ -252,15 +317,16 @@ cmd_status() {
 cmd_logs() {
     ensure_dirs
     touch "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
-
     info "Tailing logs (Ctrl+C to stop)..."
     tail -f "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
 }
 
 cmd_enable() {
     info "Enabling auto-run via systemd user service..."
-
     mkdir -p "$USER_SERVICE_DIR"
+
+    local port="8000"
+    [ -f "$PORT_FILE" ] && port=$(cat "$PORT_FILE")
 
     cat > "$USER_SERVICE_FILE" <<EOF
 [Unit]
@@ -270,7 +336,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=$BACKEND_DIR
-ExecStart=$VENV_DIR/bin/daphne -b $APP_HOST -p $APP_PORT transtream.asgi:application
+ExecStart=$VENV_DIR/bin/daphne -b $APP_HOST -p $port transtream.asgi:application
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:$LOG_DIR/daphne.log
@@ -284,54 +350,55 @@ EOF
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME"
 
-    ok "Auto-run ENABLED. TranStream will start on login."
-    info "To start now: systemctl --user start $SERVICE_NAME"
-    info "To disable:   transtream disable"
+    ok "Auto-run ENABLED on port $port. TranStream will start on login."
+    info "Start now : systemctl --user start $SERVICE_NAME"
+    info "Disable   : transtream disable"
 }
 
 cmd_disable() {
     info "Disabling auto-run..."
-
     systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
     systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
     rm -f "$USER_SERVICE_FILE"
     systemctl --user daemon-reload
-
     ok "Auto-run DISABLED. TranStream will NOT start automatically."
 }
 
 cmd_help() {
     cat <<EOF
-TranStream CLI — Application Management
+TranStream CLI — Application Management (Dynamic Port Edition)
 
 Usage:
   transtream <command>
 
 Commands:
-  start       Start Redis (if needed) + Daphne ASGI server
-  stop        Stop Daphne (and Redis if we started it)
-  restart     Stop then start
-  status      Show running processes, ports, and auto-run state
+  start       Find free port → start Redis (if needed) → start Daphne
+  stop        Stop Daphne (and Redis only if we started it)
+  restart     Stop → start
+  status      Show port, PIDs, bindings, auto-run state
   logs        Tail application log files
   enable      Install systemd user service for auto-start on login
   disable     Remove systemd user service (default: no auto-run)
   help        Show this help message
 
-Default behavior:
-  • NO auto-run. The app only runs when you explicitly start it.
-  • Redis is started only if not already running on port $REDIS_PORT.
-  • Daphne binds to http://$APP_HOST:$APP_PORT/
+Port behavior:
+  • Preferred port: $PREFERRED_PORT (override: TRANSTREAM_PORT=NNNN)
+  • If busy, scans upward (max +200) for first free port.
+  • Chosen port saved to: $PORT_FILE
+  • NEVER kills a process it did not start.
 
-Optional environment overrides:
-  TRANSTREAM_PORT=8080 transtream start
-  TRANSTREAM_HOST=0.0.0.0 transtream start
-  TRANSTREAM_REDIS_PORT=6379 transtream start
+Environment overrides:
+  TRANSTREAM_PORT=8080       Preferred starting port
+  TRANSTREAM_HOST=0.0.0.0    Bind address
+  TRANSTREAM_REDIS_PORT=6380 Redis port
 
-Project directory: $PROJECT_DIR
-Script path:       $SCRIPT_PATH
-Log directory:     $LOG_DIR
+Project dir : $PROJECT_DIR
+Script path : $SCRIPT_PATH
+Log dir     : $LOG_DIR
 EOF
 }
+
+# ─── Dispatcher ───────────────────────────────────────────────────────────
 
 case "${1:-help}" in
     start)   cmd_start ;;
