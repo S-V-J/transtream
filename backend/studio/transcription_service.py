@@ -1,84 +1,200 @@
 """
-TranStream Transcription Service (Phase 5).
-Uses Faster-Whisper (CTranslate2) for lightweight, local,
-high-performance speech-to-text and automatic language detection.
-Bypasses the 'av' package by using soundfile + numpy, ensuring 
-compatibility with Python 3.14.
+TranStream Transcription Service (Phase 5 / 5.5).
+
+Single source of truth for speech-to-text + language identification.
+
+CRITICAL DESIGN RULE (learned the hard way in this project):
+    Faster-Whisper is ALWAYS fed a NumPy float32 array, NEVER a file path.
+
+    model.transcribe("<path>") internally calls
+        faster_whisper.audio.decode_audio -> av.open()
+    which (a) reintroduces the PyAV/Python-3.14 fragility that produced
+    "open() got an unexpected keyword argument 'metadata_errors'", and
+    (b) attempts to demux containers that may be truncated/incomplete.
+
+    By decoding with soundfile ourselves and handing over a contiguous
+    float32 ndarray, the `av` package is never touched on this path.
+    `av` remains installed only because faster_whisper's module import
+    graph references it; it is not exercised here.
+
+Thread-safety:
+    The model is a process-wide singleton guarded by a lock, because the
+    live-preview task and the post-stop task can legitimately overlap on
+    the first ever invocation (model download/load ~10-15 s cold).
 """
+
 import logging
+import threading
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+# ─── Process-wide model singleton ──────────────────────────────────────────
+
 _model = None
+_model_lock = threading.Lock()
+_model_failed = False          # sticky: do not retry a broken install forever
+
 
 def get_model():
-    global _model
-    if _model is None:
-        model_size = getattr(settings, "WHISPER_MODEL_SIZE", "tiny")
-        device = getattr(settings, "WHISPER_DEVICE", "cpu")
-        compute_type = getattr(settings, "WHISPER_COMPUTE_TYPE", "int8")
-        logger.info(f"Loading Faster-Whisper model ({model_size}, {compute_type}, {device})...")
+    """
+    Lazily construct the CTranslate2 Whisper model exactly once.
+
+    Returns the model instance.
+    Raises TranscriptionError (never ImportError) so callers on worker
+    threads get a clean, catchable failure instead of a raw import leak.
+    """
+    global _model, _model_failed
+
+    if _model is not None:
+        return _model
+    if _model_failed:
+        raise TranscriptionError("Faster-Whisper model unavailable (previous load failed).")
+
+    # Double-checked locking: only one thread pays the cold-load cost.
+    with _model_lock:
+        if _model is not None:
+            return _model
+        if _model_failed:
+            raise TranscriptionError("Faster-Whisper model unavailable (previous load failed).")
+
+        model_size = str(getattr(settings, "WHISPER_MODEL_SIZE", "tiny"))
+        device = str(getattr(settings, "WHISPER_DEVICE", "cpu"))
+        compute_type = str(getattr(settings, "WHISPER_COMPUTE_TYPE", "int8"))
+
+        logger.info(
+            "Loading Faster-Whisper model (size=%s, device=%s, compute=%s)...",
+            model_size, device, compute_type,
+        )
         try:
             from faster_whisper import WhisperModel
             _model = WhisperModel(model_size, device=device, compute_type=compute_type)
             logger.info("Faster-Whisper model loaded successfully")
-        except ImportError:
-            logger.error("faster-whisper not installed. Run: pip install faster-whisper")
-            raise
+        except ImportError as exc:
+            _model_failed = True
+            logger.error("faster-whisper not importable: %s", exc)
+            raise TranscriptionError(
+                "faster-whisper is not installed. Run: pip install faster-whisper"
+            ) from exc
+        except Exception as exc:
+            _model_failed = True
+            logger.exception("Faster-Whisper model load failed: %s", exc)
+            raise TranscriptionError(f"Faster-Whisper model load failed: {exc}") from exc
+
     return _model
 
+
 class TranscriptionError(Exception):
+    """Raised when transcription fails. Always catchable, never a raw import error."""
     pass
 
-def transcribe_audio_progressive(wav_path, result_queue):
+
+# ─── Audio loading (soundfile -> ndarray; NO av) ───────────────────────────
+
+def _load_pcm16k_mono(wav_path: Path) -> np.ndarray:
     """
-    Runs transcription in a background thread and puts progressive 
-    results into the provided thread-safe queue for real-time UI updates.
+    Read a WAV file into a contiguous float32 mono array at 16 kHz.
+
+    Raises TranscriptionError on any format problem so the caller never
+    has to distinguish IO errors from inference errors.
     """
     try:
         audio, sample_rate = sf.read(str(wav_path), dtype="float32")
     except Exception as exc:
-        result_queue.put({"error": f"Failed to read WAV file: {exc}"})
-        return
+        raise TranscriptionError(f"Failed to read audio file {wav_path.name}: {exc}") from exc
 
     if sample_rate != 16000:
-        result_queue.put({"error": f"Expected 16000 Hz, got {sample_rate} Hz."})
-        return
+        raise TranscriptionError(
+            f"Expected 16000 Hz for {wav_path.name}, got {sample_rate} Hz. "
+            f"Run FFmpeg normalization first (Phase 3)."
+        )
 
-    if audio.ndim > 1:
+    if audio.ndim > 1:          # defensive: stereo slips through if a caller forgets
         audio = audio[:, 0]
+
     audio = np.ascontiguousarray(audio, dtype=np.float32)
 
+    if audio.size == 0:
+        raise TranscriptionError(f"Audio file {wav_path.name} is empty.")
+
+    return audio
+
+
+# ─── Public API ────────────────────────────────────────────────────────────
+
+def transcribe_audio(wav_path: Path, beam_size: int = 5) -> dict:
+    """
+    Transcribe a normalized 16 kHz mono PCM WAV.
+
+    Args:
+        wav_path:  path to a *complete* WAV produced by Phase 3 normalization.
+        beam_size: 5 for the authoritative post-stop pass (best accuracy);
+                   1 for the live rolling preview (best latency).
+
+    Returns:
+        {
+          "language": str,                 # ISO-639-1, e.g. "en"
+          "language_probability": float,
+          "segments": [
+             {"index","start_seconds","end_seconds",
+              "start_ms","end_ms","duration_ms","text"}, ...
+          ],
+        }
+
+    Raises:
+        TranscriptionError on read/format/inference failure.
+    """
+    wav_path = Path(wav_path).resolve()
+    if not wav_path.exists():
+        raise TranscriptionError(f"Audio file not found: {wav_path}")
+
+    audio = _load_pcm16k_mono(wav_path)      # <- ndarray, so av is never invoked
     model = get_model()
 
     try:
-        # Pass numpy array directly, bypassing 'av' entirely
-        segments, info = model.transcribe(
-            audio,
-            beam_size=5,
+        segments_iter, info = model.transcribe(
+            audio,                            # NOTE: array, not path
+            beam_size=max(1, int(beam_size)),
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
-        
-        # Yield segments progressively as they are generated
-        for seg in segments:
-            result_queue.put({
-                "type": "segment",
-                "start_ms": int(round(seg.start * 1000)),
-                "end_ms": int(round(seg.end * 1000)),
-                "duration_ms": int(round((seg.end - seg.start) * 1000)),
-                "text": seg.text.strip(),
+
+        result_segments = []
+        for idx, seg in enumerate(segments_iter):
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            result_segments.append({
+                "index": idx,
+                "start_seconds": round(float(seg.start), 3),
+                "end_seconds": round(float(seg.end), 3),
+                "start_ms": int(round(float(seg.start) * 1000)),
+                "end_ms": int(round(float(seg.end) * 1000)),
+                "duration_ms": int(round((float(seg.end) - float(seg.start)) * 1000)),
+                "text": text,
             })
-            
-        # Signal completion with language info
-        result_queue.put({
-            "type": "complete",
-            "language": info.language,
-            "language_probability": info.language_probability,
-        })
-        
+    except TranscriptionError:
+        raise
     except Exception as exc:
-        result_queue.put({"error": f"Whisper transcription failed: {exc}"})
+        raise TranscriptionError(f"Whisper inference failed: {exc}") from exc
+
+    logger.info(
+        "Transcription complete: %s -> lang=%s (%.2f), %d segment(s), beam=%d",
+        wav_path.name, info.language, info.language_probability,
+        len(result_segments), beam_size,
+    )
+
+    return {
+        "language": info.language,
+        "language_probability": float(info.language_probability),
+        "segments": result_segments,
+    }
+
+
+def join_segments(segments: list[dict]) -> str:
+    """Flatten a segment list into a single readable line (used by live preview)."""
+    return " ".join(s["text"].strip() for s in segments if s.get("text")).strip()

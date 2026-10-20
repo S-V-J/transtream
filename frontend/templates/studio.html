@@ -5,11 +5,27 @@
 
 {% block content %}
 <div x-data="studioRecorder" class="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+
+  <!-- Left Sidebar: Workspace Tree Placeholder -->
   <aside class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
-    <h2 class="mb-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Workspaces</h2>
-    <button type="button" disabled title="Workspace file manager arrives in Phase 8" class="mb-4 w-full cursor-not-allowed rounded-xl border border-white/10 bg-slate-800/50 px-3 py-2 text-left text-sm text-slate-500">📂 Open File System</button>
+    <h2 class="mb-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+      Workspaces
+    </h2>
+
+    <button
+      type="button"
+      disabled
+      title="Workspace file manager arrives in Phase 8"
+      class="mb-4 w-full cursor-not-allowed rounded-xl border border-white/10 bg-slate-800/50 px-3 py-2 text-left text-sm text-slate-500"
+    >
+      📂 Open File System
+    </button>
+
     <div class="space-y-2 text-sm text-slate-400">
-      <div class="flex items-center gap-2"><span>▼</span><span>📂 Local Recordings</span></div>
+      <div class="flex items-center gap-2">
+        <span>▼</span>
+        <span>📂 Local Recordings</span>
+      </div>
       <div class="ml-6 space-y-1 text-slate-500">
         <div>📁 media/recordings</div>
         <div class="text-xs text-slate-600">Raw + normalized + transcribed takes.</div>
@@ -17,166 +33,395 @@
     </div>
   </aside>
 
+  <!-- Right Panel: Studio Canvas -->
   <section class="space-y-4">
-    <div x-show="error" x-cloak class="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+
+    <!-- Error Banner -->
+    <div
+      x-show="error"
+      x-cloak
+      class="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200"
+    >
       <div class="flex items-start justify-between gap-3">
-        <div><span class="font-semibold">Error:</span> <span x-text="error"></span></div>
-        <button type="button" @click="error = null" class="rounded-md border border-rose-400/30 px-2 py-1 text-xs text-rose-200 transition hover:bg-rose-500/20">Dismiss</button>
+        <div>
+          <span class="font-semibold">Error:</span>
+          <span x-text="error"></span>
+        </div>
+        <button
+          type="button"
+          @click="error = null"
+          class="rounded-md border border-rose-400/30 px-2 py-1 text-xs text-rose-200 transition hover:bg-rose-500/20"
+        >
+          Dismiss
+        </button>
       </div>
     </div>
 
+    <!-- Status Bar -->
     <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex flex-wrap items-center gap-3">
-          <span class="inline-flex h-3 w-3 rounded-full" :class="recording ? 'bg-red-500 animate-pulse' : connecting ? 'bg-amber-400 animate-pulse' : normalizing ? 'bg-blue-400 animate-pulse' : vadRunning ? 'bg-purple-400 animate-pulse' : transcribing ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"></span>
+          <span
+            class="inline-flex h-3 w-3 rounded-full"
+            :class="recording ? (liveTranscriptText ? 'bg-emerald-500 animate-pulse' : 'bg-red-500 animate-pulse')
+                   : connecting ? 'bg-amber-400 animate-pulse'
+                   : normalizing ? 'bg-blue-400 animate-pulse'
+                   : vadRunning ? 'bg-purple-400 animate-pulse'
+                   : transcribing ? 'bg-emerald-400 animate-pulse'
+                   : 'bg-slate-600'"
+          ></span>
+
           <span class="font-mono text-sm text-slate-200" x-text="fmtTime(elapsedMs)">00:00:00.0</span>
           <span class="text-sm text-slate-400" x-text="pipelineLabel()">Idle</span>
+
           <template x-if="languageDetected">
-            <span class="text-sm text-slate-500">Language Detected: <span class="font-mono text-cyan-300" x-text="languageDetected"></span></span>
+            <span class="text-sm text-slate-500">
+              Language Detected:
+              <span class="font-mono text-cyan-300" x-text="languageDetected"></span>
+              <span class="text-slate-600" x-show="languageProbability > 0"
+                    x-text="'(' + Math.round(languageProbability * 100) + '%)'"></span>
+            </span>
           </template>
           <template x-if="!languageDetected">
-            <span class="text-sm text-slate-500">Language Detected: —</span>
+            <span class="text-sm text-slate-500">
+              Language Detected:
+              <span x-show="liveLanguage" class="font-mono text-emerald-400/70"
+                    x-text="liveLanguage + ' (live)'"></span>
+              <span x-show="!liveLanguage">—</span>
+            </span>
           </template>
         </div>
-        <button type="button" @click="nativeScript = !nativeScript" disabled title="Native script toggle arrives in Phase 6" class="cursor-not-allowed rounded-full border border-cyan-400/20 bg-cyan-500/5 px-3 py-1 text-xs font-medium text-cyan-700">✨ View Native Script</button>
+
+        <button
+          type="button"
+          @click="nativeScript = !nativeScript"
+          disabled
+          title="Native script toggle arrives in Phase 6"
+          class="cursor-not-allowed rounded-full border border-cyan-400/20 bg-cyan-500/5 px-3 py-1 text-xs font-medium text-cyan-700"
+        >
+          ✨ View Native Script
+        </button>
       </div>
 
+      <!-- Pipeline progress indicators -->
       <div x-show="normalizing" x-cloak class="mt-3 rounded-xl border border-blue-500/20 bg-blue-500/5 px-3 py-2">
         <div class="flex items-center gap-2 text-xs text-blue-300">
-          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
           <span x-text="normalizeMessage">Normalizing audio…</span>
         </div>
       </div>
+
       <div x-show="vadRunning" x-cloak class="mt-3 rounded-xl border border-purple-500/20 bg-purple-500/5 px-3 py-2">
         <div class="flex items-center gap-2 text-xs text-purple-300">
-          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
           <span x-text="vadMessage">Detecting speech segments…</span>
         </div>
       </div>
+
       <div x-show="transcribing" x-cloak class="mt-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-2">
         <div class="flex items-center gap-2 text-xs text-emerald-300">
-          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+          <svg class="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
           <span x-text="transcribeMessage">Transcribing with Faster-Whisper…</span>
         </div>
       </div>
 
+      <!-- Counters -->
       <div class="mt-4 grid gap-3 text-xs text-slate-400 sm:grid-cols-2 lg:grid-cols-6">
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2"><div class="mb-1 text-slate-500">Client chunks sent</div><div class="font-mono text-sm text-slate-200" x-text="chunksSent">0</div></div>
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2"><div class="mb-1 text-slate-500">Server chunks received</div><div class="font-mono text-sm text-slate-200" x-text="chunksReceived">0</div></div>
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2"><div class="mb-1 text-slate-500">Server bytes</div><div class="font-mono text-sm text-slate-200" x-text="fmtBytes(bytesReceived)">0 B</div></div>
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2"><div class="mb-1 text-slate-500">Server duration</div><div class="font-mono text-sm text-slate-200" x-text="fmtTime(serverDurationMs)">00:00:00.0</div></div>
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2" x-show="maxBytes > 0"><div class="mb-1 text-slate-500">Max take size</div><div class="font-mono text-sm text-slate-200" x-text="fmtBytes(maxBytes)">0 B</div></div>
-        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2" x-show="transcriptSegments.length > 0"><div class="mb-1 text-slate-500">Transcript segments</div><div class="font-mono text-sm text-emerald-300" x-text="transcriptSegments.length">0</div></div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2">
+          <div class="mb-1 text-slate-500">Client chunks sent</div>
+          <div class="font-mono text-sm text-slate-200" x-text="chunksSent">0</div>
+        </div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2">
+          <div class="mb-1 text-slate-500">Server chunks received</div>
+          <div class="font-mono text-sm text-slate-200" x-text="chunksReceived">0</div>
+        </div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2">
+          <div class="mb-1 text-slate-500">Server bytes</div>
+          <div class="font-mono text-sm text-slate-200" x-text="fmtBytes(bytesReceived)">0 B</div>
+        </div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2">
+          <div class="mb-1 text-slate-500">Server duration</div>
+          <div class="font-mono text-sm text-slate-200" x-text="fmtTime(serverDurationMs)">00:00:00.0</div>
+        </div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2" x-show="maxBytes > 0">
+          <div class="mb-1 text-slate-500">Max take size</div>
+          <div class="font-mono text-sm text-slate-200" x-text="fmtBytes(maxBytes)">0 B</div>
+        </div>
+        <div class="rounded-xl border border-white/5 bg-slate-950/50 px-3 py-2"
+             x-show="transcriptSegments.length > 0 || liveSegmentCount > 0">
+          <div class="mb-1 text-slate-500">
+            <span x-show="transcriptSegments.length > 0">Transcript segments</span>
+            <span x-show="transcriptSegments.length === 0 && liveSegmentCount > 0">Live segments</span>
+          </div>
+          <div class="font-mono text-sm"
+               :class="transcriptSegments.length > 0 ? 'text-emerald-300' : 'text-emerald-400/70'"
+               x-text="transcriptSegments.length > 0 ? transcriptSegments.length : liveSegmentCount">0</div>
+        </div>
       </div>
     </div>
 
+    <!-- Transcription Canvas -->
     <div class="min-h-[360px] rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-sm leading-7 text-slate-200 shadow-inner shadow-black/30">
+
+      <!-- Idle -->
       <template x-if="!recording && !saved && !connecting && !normalizing && !vadRunning && !transcribing && transcriptSegments.length === 0">
         <div class="space-y-3">
           <p class="text-slate-300">TranStream Studio is ready.</p>
-          <p class="text-slate-500">Click <span class="text-emerald-300">🎤 Start</span> to capture microphone audio. Pipeline: record → save raw → FFmpeg normalize → Silero VAD → Faster-Whisper transcription.</p>
+          <p class="text-slate-500">
+            Click <span class="text-emerald-300">🎤 Start</span> to capture microphone audio.
+            Pipeline: record → save raw → FFmpeg normalize → Silero VAD → Faster-Whisper transcription.
+            Live preview streams while you speak.
+          </p>
         </div>
       </template>
-      <template x-if="connecting"><p class="text-amber-300">Requesting microphone permission and opening WebSocket…</p></template>
+
+      <!-- Connecting -->
+      <template x-if="connecting">
+        <p class="text-amber-300">Requesting microphone permission and opening WebSocket…</p>
+      </template>
+
+      <!-- Recording (+ live preview) -->
       <template x-if="recording">
         <div class="space-y-3">
           <p class="text-red-300">● Live ingestion active.</p>
           <p class="text-slate-400">Speak now. 100 ms chunks are streaming to the backend.</p>
+
+          <template x-if="liveTranscriptText">
+            <div class="mt-4 rounded-xl border border-emerald-500/25 bg-emerald-500/5 p-4">
+              <div class="mb-2 flex items-center gap-2">
+                <span class="inline-flex h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <p class="text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                  Live Transcript Preview
+                </p>
+                <span class="ml-auto text-[10px] text-slate-500">
+                  <span x-text="liveSegmentCount"></span> seg · rolling
+                </span>
+              </div>
+              <p class="text-sm leading-relaxed text-slate-100" x-text="liveTranscriptText"></p>
+              <p class="mt-2 text-[11px] text-slate-500">
+                Interim text — the authoritative timestamped transcript replaces this after Stop.
+              </p>
+            </div>
+          </template>
+
+          <template x-if="!liveTranscriptText">
+            <p class="mt-4 text-xs text-slate-500">
+              Keep speaking ~3 seconds for the live preview to appear…
+            </p>
+          </template>
         </div>
       </template>
+
+      <!-- Normalizing -->
       <template x-if="normalizing && !recording">
         <div class="space-y-3">
           <p class="text-blue-300">⟳ Normalizing audio…</p>
           <p class="text-slate-400" x-text="normalizeMessage">Converting to 16 kHz, 1-channel, 16-bit PCM WAV…</p>
         </div>
       </template>
+
+      <!-- VAD running -->
       <template x-if="vadRunning && !recording && !normalizing">
         <div class="space-y-3">
           <p class="text-purple-300">◈ Detecting speech segments…</p>
           <p class="text-slate-400" x-text="vadMessage">Running Silero VAD on normalized audio…</p>
         </div>
       </template>
+
+      <!-- Transcribing -->
       <template x-if="transcribing && !recording && !normalizing && !vadRunning">
         <div class="space-y-3">
           <p class="text-emerald-300">◈ Transcribing audio…</p>
-          <p class="text-slate-400" x-text="transcribeMessage">Running Faster-Whisper (this may take a moment on first run)…</p>
+          <p class="text-slate-400" x-text="transcribeMessage">Running Faster-Whisper…</p>
         </div>
       </template>
 
-      <template x-if="saved && !recording && !normalizing && !vadRunning && !transcribing">
+      <!--
+        RESULTS.
+        Resilience fix: this block keys off `saved` only (plus "no stage active"),
+        NOT off VAD/transcript success. So even if a later stage fails, you still
+        see the raw + normalized evidence instead of being dumped back to Idle.
+      -->
+      <template x-if="saved && !recording && !connecting && !normalizing && !vadRunning && !transcribing">
         <div class="space-y-4">
+
+          <!-- Raw file info -->
           <div>
             <p class="text-emerald-300">Raw recording saved.</p>
-            <p class="text-slate-300">File: <span class="break-all text-cyan-300" x-text="saved.filename"></span></p>
-            <p class="text-slate-400 text-xs"><span x-text="fmtBytes(saved.bytes)"></span> · <span x-text="saved.chunks"></span> chunks · <span x-text="fmtTime(saved.duration_ms)"></span> · <span x-text="saved.mime || 'unknown'"></span></p>
+            <p class="text-slate-300">
+              File: <span class="break-all text-cyan-300" x-text="saved.filename"></span>
+            </p>
+            <p class="text-xs text-slate-400">
+              <span x-text="fmtBytes(saved.bytes)"></span>
+              · <span x-text="saved.chunks"></span> chunks
+              · <span x-text="fmtTime(saved.duration_ms)"></span>
+              · <span x-text="saved.mime || 'unknown'"></span>
+            </p>
           </div>
+
+          <!-- Normalized file info -->
           <template x-if="normalized">
             <div class="border-t border-white/10 pt-3">
               <p class="text-blue-300">✓ Normalized WAV ready.</p>
-              <p class="text-slate-300">File: <span class="break-all text-cyan-300" x-text="normalized.output_file"></span></p>
-              <p class="text-slate-400 text-xs"><span x-text="fmtBytes(normalized.size_bytes)"></span> · <span x-text="fmtTime(normalized.duration_ms)"></span> · <span x-text="fmtSampleRate(normalized.sample_rate)"></span> · <span x-text="normalized.channels"></span> ch · <span x-text="normalized.bit_depth"></span>-bit PCM</p>
+              <p class="text-slate-300">
+                File: <span class="break-all text-cyan-300" x-text="normalized.output_file"></span>
+              </p>
+              <p class="text-xs text-slate-400">
+                <span x-text="fmtBytes(normalized.size_bytes)"></span>
+                · <span x-text="fmtTime(normalized.duration_ms)"></span>
+                · <span x-text="fmtSampleRate(normalized.sample_rate)"></span>
+                · <span x-text="normalized.channels"></span> ch
+                · <span x-text="normalized.bit_depth"></span>-bit PCM
+              </p>
             </div>
           </template>
-          <template x-if="transcriptSegments.length > 0">
+
+          <!-- VAD segmented timeline -->
+          <template x-if="vadSegments.length > 0">
             <div class="border-t border-white/10 pt-3">
-              <p class="text-emerald-300">✓ Transcription complete.</p>
-              <div class="mt-2 space-y-2">
-                <template x-for="seg in transcriptSegments" :key="seg.start_ms">
-                  <div class="flex items-start gap-2 rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-3 py-2 text-sm">
-                    <span class="shrink-0 font-mono text-emerald-400 text-xs mt-0.5" x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                    <span class="text-slate-200" x-text="seg.text"></span>
+              <p class="text-purple-300">
+                ◈ <span x-text="vadSegments.length"></span> speech segment(s) detected
+                · total speech: <span x-text="fmtTime(vadTotalSpeechMs)"></span>
+              </p>
+              <div class="mt-2 space-y-1">
+                <template x-for="seg in vadSegments" :key="seg.index">
+                  <div class="flex items-start gap-2 rounded-lg border border-purple-500/10 bg-purple-500/5 px-3 py-1.5 text-xs">
+                    <span class="shrink-0 font-mono text-purple-400" x-text="'[' + seg.index + ']'"></span>
+                    <span class="font-mono text-slate-300" x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
+                    <span class="text-slate-500" x-text="'(' + (seg.duration_ms / 1000).toFixed(2) + 's)'"></span>
                   </div>
                 </template>
               </div>
             </div>
           </template>
-          <template x-if="transcriptSegments.length === 0 && !transcribing && normalized">
+
+          <!-- Authoritative transcript -->
+          <template x-if="transcriptSegments.length > 0">
             <div class="border-t border-white/10 pt-3">
-              <p class="text-amber-300">No speech detected or transcription failed. The audio may contain only silence or noise.</p>
+              <p class="text-emerald-300">
+                ✓ Transcription complete
+                <span x-show="languageDetected" class="text-slate-500">
+                  · language <span class="font-mono text-cyan-300" x-text="languageDetected"></span>
+                </span>
+              </p>
+              <div class="mt-2 space-y-2">
+                <template x-for="(seg, i) in transcriptSegments" :key="seg.start_ms + '-' + i">
+                  <div class="flex items-start gap-2 rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-3 py-2 text-sm">
+                    <span class="mt-0.5 shrink-0 font-mono text-xs text-emerald-400"
+                          x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
+                    <span class="text-slate-100" x-text="seg.text"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- Nothing recognized -->
+          <template x-if="transcriptSegments.length === 0 && normalized && vadSegments.length === 0">
+            <div class="border-t border-white/10 pt-3">
+              <p class="text-amber-300">
+                No speech detected. The take may contain only silence or noise.
+              </p>
             </div>
           </template>
         </div>
       </template>
     </div>
 
-    <div x-show="saved && saved.url && !recording" x-cloak class="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4 shadow-xl shadow-black/20">
+    <!-- Raw Audio Player -->
+    <div x-show="saved && saved.url && !recording" x-cloak
+         class="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4 shadow-xl shadow-black/20">
       <h3 class="mb-1 text-sm font-semibold text-amber-300">Raw Browser Capture</h3>
       <p class="mb-3 text-xs text-slate-500" x-text="saved ? saved.mime : ''"></p>
       <audio controls class="w-full" :src="saved ? saved.url : ''"></audio>
       <div class="mt-3 flex flex-wrap gap-2">
-        <a :href="saved ? saved.url : '#'" :download="saved ? saved.filename : ''" class="rounded-xl bg-amber-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-amber-600">⬇️ Download Raw</a>
-        <button type="button" @click="saved = null; normalized = null; normalizeMessage = ''; vadSegments = []; vadTotalSpeechMs = 0; vadMessage = ''; transcriptSegments = []; languageDetected = ''" class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">Clear Result</button>
+        <a :href="saved ? saved.url : '#'" :download="saved ? saved.filename : ''"
+           class="rounded-xl bg-amber-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-amber-600">
+          ⬇️ Download Raw
+        </a>
+        <button type="button"
+                @click="saved = null; normalized = null; normalizeMessage = ''; vadSegments = []; vadTotalSpeechMs = 0; vadMessage = ''; transcriptSegments = []; languageDetected = ''; languageProbability = 0; liveTranscriptText = ''; liveSegmentCount = 0; liveLanguage = ''"
+                class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
+          Clear Result
+        </button>
       </div>
     </div>
 
-    <div x-show="normalized && normalized.output_url && !recording && !normalizing" x-cloak class="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-4 shadow-xl shadow-black/20">
+    <!-- Normalized Audio Player -->
+    <div x-show="normalized && normalized.output_url && !recording && !normalizing" x-cloak
+         class="rounded-2xl border border-blue-500/20 bg-blue-500/5 p-4 shadow-xl shadow-black/20">
       <h3 class="mb-1 text-sm font-semibold text-blue-300">Normalized PCM WAV</h3>
-      <p class="mb-3 text-xs text-slate-400"><span x-text="normalized ? fmtSampleRate(normalized.sample_rate) : ''"></span> · <span x-text="normalized ? normalized.channels : ''"></span> channel · <span x-text="normalized ? normalized.bit_depth : ''"></span>-bit · <span x-text="normalized ? fmtBytes(normalized.size_bytes) : ''"></span></p>
+      <p class="mb-3 text-xs text-slate-400">
+        <span x-text="normalized ? fmtSampleRate(normalized.sample_rate) : ''"></span>
+        · <span x-text="normalized ? normalized.channels : ''"></span> channel
+        · <span x-text="normalized ? normalized.bit_depth : ''"></span>-bit
+        · <span x-text="normalized ? fmtBytes(normalized.size_bytes) : ''"></span>
+      </p>
       <audio controls class="w-full" :src="normalized ? normalized.output_url : ''"></audio>
       <div class="mt-3 flex flex-wrap gap-2">
-        <a :href="normalized ? normalized.output_url : '#'" :download="normalized ? normalized.output_file : ''" class="rounded-xl bg-blue-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-600">⬇️ Download WAV</a>
+        <a :href="normalized ? normalized.output_url : '#'" :download="normalized ? normalized.output_file : ''"
+           class="rounded-xl bg-blue-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-blue-600">
+          ⬇️ Download WAV
+        </a>
       </div>
     </div>
 
+    <!-- Controls -->
     <div class="flex flex-wrap gap-2">
-      <button type="button" @click="start()" :disabled="pipelineBusy()" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">🎤 Start</button>
-      <button type="button" @click="stop()" :disabled="!recording" class="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">⏹️ Stop</button>
-      <button type="button" disabled title="Metadata/workspace save arrives in Phase 8/9" class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">💾 Save</button>
-      <button type="button" disabled title="Upload pipeline arrives in Phase 9" class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">📤 Upload</button>
+      <button type="button" @click="start()" :disabled="pipelineBusy()"
+              class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
+        🎤 Start
+      </button>
+      <button type="button" @click="stop()" :disabled="!recording"
+              class="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
+        ⏹️ Stop
+      </button>
+      <button type="button" disabled title="Metadata/workspace save arrives in Phase 8/9"
+              class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
+        💾 Save
+      </button>
+      <button type="button" disabled title="Upload pipeline arrives in Phase 9"
+              class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
+        📤 Upload
+      </button>
     </div>
 
+    <!-- Translation / TTS Placeholder -->
     <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
       <label class="mb-3 block text-sm font-medium text-slate-400">Target Language Translation</label>
       <div class="flex flex-wrap items-center gap-2">
-        <select disabled class="min-w-[180px] cursor-not-allowed rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-500 outline-none">
-          <option>English</option><option>French</option><option>Spanish</option><option>German</option><option>Hindi</option><option>Arabic</option><option>Chinese</option><option>Japanese</option>
+        <select disabled
+                class="min-w-[180px] cursor-not-allowed rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-500 outline-none">
+          <option>English</option><option>French</option><option>Spanish</option><option>German</option>
+          <option>Hindi</option><option>Arabic</option><option>Chinese</option><option>Japanese</option>
         </select>
-        <button type="button" disabled title="Argos Translate arrives in Phase 6" class="cursor-not-allowed rounded-xl bg-indigo-700/40 px-3 py-2 text-sm font-semibold text-indigo-200/60">🔀 Translate</button>
-        <button type="button" disabled title="Playback controls arrive in Phase 7" class="cursor-not-allowed rounded-xl bg-slate-700/60 px-3 py-2 text-sm font-semibold text-slate-400">🔊 Play Audio</button>
-        <button type="button" disabled title="Piper TTS voice avatars arrive in Phase 7" class="cursor-not-allowed rounded-xl bg-slate-700/60 px-3 py-2 text-sm font-semibold text-slate-400">🤖 Play Voice Avatar</button>
+        <button type="button" disabled title="Argos Translate arrives in Phase 6"
+                class="cursor-not-allowed rounded-xl bg-indigo-700/40 px-3 py-2 text-sm font-semibold text-indigo-200/60">
+          🔀 Translate
+        </button>
+        <button type="button" disabled title="Playback controls arrive in Phase 7"
+                class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
+          🔊 Play Audio
+        </button>
+        <button type="button" disabled title="Piper TTS voice avatars arrive in Phase 7"
+                class="cursor-not-allowed rounded-xl bg-slate-700/60 px-4 py-2 text-sm font-semibold text-slate-400">
+          🤖 Play Voice Avatar
+        </button>
       </div>
-      <p class="mt-3 text-xs text-slate-500">Translation and TTS controls are intentionally disabled until Phase 6/7.</p>
+      <p class="mt-3 text-xs text-slate-500">
+        Translation and TTS controls are intentionally disabled until Phase 6/7.
+      </p>
     </div>
+
   </section>
 </div>
 {% endblock %}

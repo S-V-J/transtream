@@ -1,5 +1,19 @@
+// ─── TranStream Studio recorder component (Phases 2 + 3 + 4 + 5 + 5.5) ────
+//
+// Browser mic → MediaRecorder 100 ms slices → WebSocket binary frames
+// → Django Channels AudioConsumer → incremental temp file → raw recording
+// → FFmpeg normalization → 16 kHz mono PCM WAV
+// → Silero VAD segments → Faster-Whisper transcript.
+// + live rolling preview ("live_transcript_update") while recording.
+//
+// Ordering guarantee (Phase 2, unchanged): every slice is pushed through a
+// serialized promise queue so binary frames reach the server in capture
+// order; the JSON "stop" control is sent only after the queue drains.
+// This is what keeps the concatenated WebM container valid.
+
 document.addEventListener('alpine:init', () => {
   Alpine.data('studioRecorder', () => ({
+    // ── public state ──
     recording: false,
     connecting: false,
     error: null,
@@ -7,20 +21,31 @@ document.addEventListener('alpine:init', () => {
     sessionId: '',
     nativeScript: false,
 
+    // ── Phase 3: normalization ──
     normalizing: false,
     normalized: null,
     normalizeMessage: '',
 
+    // ── Phase 4: VAD ──
     vadRunning: false,
     vadSegments: [],
     vadTotalSpeechMs: 0,
     vadMessage: '',
 
+    // ── Phase 5: transcription ──
     transcribing: false,
     transcribeMessage: '',
     languageDetected: '',
+    languageProbability: 0,
     transcriptSegments: [],
 
+    // ── Phase 5.5: live rolling preview ──
+    liveTranscriptText: '',
+    liveSegmentCount: 0,
+    liveLanguage: '',
+    liveActive: false,          // true only while a take is in progress
+
+    // ── counters ─
     chunksSent: 0,
     chunksReceived: 0,
     bytesReceived: 0,
@@ -28,6 +53,7 @@ document.addEventListener('alpine:init', () => {
     elapsedMs: 0,
     maxBytes: 0,
 
+    // ── internals ──
     _ws: null,
     _recorder: null,
     _stream: null,
@@ -36,44 +62,81 @@ document.addEventListener('alpine:init', () => {
     _startTs: 0,
     _mime: '',
 
+    // ── Alpine lifecycle ──
+
     destroy() {
-      if (this.recording) { try { this.stop(); } catch (e) { /* ignore */ } }
+      if (this.recording) {
+        try { this.stop(); } catch (e) { /* ignore */ }
+      }
       this._closeSocket();
       this._cleanupStream();
       if (this._timer) { clearInterval(this._timer); this._timer = null; }
     },
 
+    // ── controls ──
+
     async start() {
       if (this.recording || this.connecting) return;
+
       this.error = null;
       this.saved = null;
+
       this.normalizing = false; this.normalized = null; this.normalizeMessage = '';
       this.vadRunning = false; this.vadSegments = []; this.vadTotalSpeechMs = 0; this.vadMessage = '';
-      this.transcribing = false; this.transcribeMessage = ''; this.languageDetected = ''; this.transcriptSegments = [];
+      this.transcribing = false; this.transcribeMessage = '';
+      this.languageDetected = ''; this.languageProbability = 0; this.transcriptSegments = [];
+      this.liveTranscriptText = ''; this.liveSegmentCount = 0; this.liveLanguage = '';
+      this.liveActive = true;
+
       this.chunksSent = 0; this.chunksReceived = 0; this.bytesReceived = 0;
       this.serverDurationMs = 0; this.elapsedMs = 0;
+
       this._sendQueue = Promise.resolve();
       this.sessionId = this._newSessionId();
       this.connecting = true;
 
+      // 1. microphone permission + stream
       let stream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
       } catch (err) {
-        this.connecting = false; this.error = this._micErrorMessage(err); return;
+        this.connecting = false;
+        this.liveActive = false;
+        this.error = this._micErrorMessage(err);
+        return;
       }
       this._stream = stream;
 
-      try { await this._openSocket(); } catch (err) {
-        this._cleanupStream(); this.connecting = false; this.error = 'WebSocket connection failed: ' + this._errMessage(err); return;
+      // 2. websocket
+      try {
+        await this._openSocket();
+      } catch (err) {
+        this._cleanupStream();
+        this.connecting = false;
+        this.liveActive = false;
+        this.error = 'WebSocket connection failed: ' + this._errMessage(err);
+        return;
       }
 
+      // 3. MediaRecorder
       const mime = this._pickMime();
       this._mime = mime;
       try {
         this._recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       } catch (err) {
-        this._closeSocket(); this._cleanupStream(); this.connecting = false; this.error = 'MediaRecorder init failed: ' + this._errMessage(err); return;
+        this._closeSocket();
+        this._cleanupStream();
+        this.connecting = false;
+        this.liveActive = false;
+        this.error = 'MediaRecorder init failed: ' + this._errMessage(err);
+        return;
       }
 
       this._recorder.ondataavailable = (e) => {
@@ -81,14 +144,24 @@ document.addEventListener('alpine:init', () => {
         this.chunksSent += 1;
         this._sendQueue = this._sendQueue
           .then(() => e.data.arrayBuffer())
-          .then((buf) => { if (this._ws && this._ws.readyState === WebSocket.OPEN) this._ws.send(buf); })
-          .catch(() => { /* socket gone */ });
+          .then((buf) => {
+            if (this._ws && this._ws.readyState === WebSocket.OPEN) this._ws.send(buf);
+          })
+          .catch(() => { /* socket gone; onclose handles UI */ });
       };
 
-      this._ws.send(JSON.stringify({ type: 'start', mime: mime || 'unknown', client_ts: Date.now(), session: this.sessionId }));
+      // 4. control message, then capture
+      this._ws.send(JSON.stringify({
+        type: 'start',
+        mime: mime || 'unknown',
+        client_ts: Date.now(),
+        session: this.sessionId,
+      }));
+
       this._recorder.start(100);
       this._startTs = performance.now();
       this._timer = setInterval(() => { this.elapsedMs = performance.now() - this._startTs; }, 100);
+
       this.connecting = false;
       this.recording = true;
     },
@@ -96,41 +169,70 @@ document.addEventListener('alpine:init', () => {
     async stop() {
       if (!this.recording) return;
       this.recording = false;
+
       if (this._timer) { clearInterval(this._timer); this._timer = null; }
+
       if (this._recorder && this._recorder.state !== 'inactive') {
         const stopped = new Promise((resolve) => { this._recorder.onstop = resolve; });
         try { this._recorder.stop(); } catch (e) { /* already stopped */ }
         await stopped;
       }
+
       await this._sendQueue;
+
       if (this._ws && this._ws.readyState === WebSocket.OPEN) {
         this._ws.send(JSON.stringify({ type: 'stop', client_ts: Date.now() }));
       }
+
+      // Preview is over the moment we stop; clear it so the results view
+      // is never visually competing with stale live text.
+      this.liveActive = false;
+      this.liveTranscriptText = '';
+      this.liveSegmentCount = 0;
+
       this._cleanupStream();
     },
+
+    // ── websocket ──
 
     _openSocket() {
       return new Promise((resolve, reject) => {
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const url = proto + '//' + location.host + '/ws/studio/' + this.sessionId + '/';
+
         const ws = new WebSocket(url);
         ws.binaryType = 'arraybuffer';
+
         let settled = false;
+
         ws.onopen = () => { this._ws = ws; settled = true; resolve(); };
         ws.onerror = () => { if (!settled) { settled = true; reject(new Error('socket error')); } };
+
         ws.onclose = (e) => {
           this._ws = null;
+          this.liveActive = false;
+
           if (this.recording) {
             this.recording = false;
             if (this._timer) { clearInterval(this._timer); this._timer = null; }
             this._cleanupStream();
             this.error = 'Connection lost during recording (code ' + e.code + ').';
           }
-          if (!settled) { settled = true; reject(new Error('closed before open (code ' + e.code + ')')); }
+
+          if (!settled) {
+            settled = true;
+            reject(new Error('closed before open (code ' + e.code + ')'));
+          }
         };
+
         ws.onmessage = (evt) => this._handleServerMessage(evt);
+
         setTimeout(() => {
-          if (!settled) { try { ws.close(); } catch (e) { /* ignore */ } settled = true; reject(new Error('handshake timeout')); }
+          if (!settled) {
+            try { ws.close(); } catch (e) { /* ignore */ }
+            settled = true;
+            reject(new Error('handshake timeout'));
+          }
         }, 8000);
       });
     },
@@ -142,41 +244,79 @@ document.addEventListener('alpine:init', () => {
     _handleServerMessage(evt) {
       let msg;
       try { msg = JSON.parse(evt.data); } catch (e) { return; }
+
       switch (msg.type) {
-        case 'connected': this.maxBytes = msg.max_bytes || this.maxBytes; break;
-        case 'started': this.maxBytes = msg.max_bytes || this.maxBytes; break;
+        case 'connected':
+          this.maxBytes = msg.max_bytes || this.maxBytes;
+          break;
+
+        case 'started':
+          this.maxBytes = msg.max_bytes || this.maxBytes;
+          break;
+
         case 'stats':
           this.chunksReceived = msg.chunks || 0;
           this.bytesReceived = msg.bytes || 0;
           this.serverDurationMs = msg.duration_ms || 0;
           break;
-        case 'saved': this.saved = msg; break;
-        case 'normalizing': this.normalizing = true; this.normalized = null; this.normalizeMessage = msg.message || 'Normalizing audio…'; break;
-        case 'normalized': this.normalizing = false; this.normalized = msg; this.normalizeMessage = ''; break;
-        case 'vad_started': this.vadRunning = true; this.vadSegments = []; this.vadTotalSpeechMs = 0; this.vadMessage = msg.message || 'Detecting speech segments…'; break;
-        case 'vad_complete': this.vadRunning = false; this.vadSegments = msg.segments || []; this.vadTotalSpeechMs = msg.total_speech_ms || 0; this.vadMessage = ''; break;
-        
-        // REAL-TIME TRANSCRIPTION PROGRESS
-        case 'transcribing_progress':
-          this.transcriptSegments.push(msg.segment);
-          this.languageDetected = '...'; 
+
+        case 'saved':
+          this.saved = msg;
           break;
-          
-        case 'transcribing_started': 
-          this.transcribing = true; 
-          this.transcriptSegments = []; 
-          this.languageDetected = ''; 
-          this.transcribeMessage = msg.message || 'Transcribing…'; 
+
+        // ── Phase 5.5: live rolling preview ──
+        // Guarded: a late preview frame must never resurrect the live box
+        // after Stop, and must never overwrite the authoritative transcript.
+        case 'live_transcript_update':
+          if (!this.recording) break;
+          this.liveTranscriptText = msg.text || '';
+          this.liveSegmentCount = msg.segment_count || 0;
+          this.liveLanguage = msg.language ? String(msg.language).toUpperCase() : '';
           break;
+
+        // ── Phase 3 ──
+        case 'normalizing':
+          this.normalizing = true; this.normalized = null;
+          this.normalizeMessage = msg.message || 'Normalizing audio\u2026';
+          break;
+
+        case 'normalized':
+          this.normalizing = false; this.normalized = msg; this.normalizeMessage = '';
+          break;
+
+        // ── Phase 4 ──
+        case 'vad_started':
+          this.vadRunning = true; this.vadSegments = []; this.vadTotalSpeechMs = 0;
+          this.vadMessage = msg.message || 'Detecting speech segments\u2026';
+          break;
+
+        case 'vad_complete':
+          this.vadRunning = false;
+          this.vadSegments = msg.segments || [];
+          this.vadTotalSpeechMs = msg.total_speech_ms || 0;
+          this.vadMessage = '';
+          break;
+
+        // ── Phase 5 ──
+        case 'transcribing_started':
+          this.transcribing = true; this.transcriptSegments = [];
+          this.languageDetected = ''; this.languageProbability = 0;
+          this.transcribeMessage = msg.message || 'Transcribing\u2026';
+          break;
+
         case 'transcribing_complete':
           this.transcribing = false;
-          this.languageDetected = msg.language ? msg.language.toUpperCase() : 'UNKNOWN';
-          if (msg.segments && msg.segments.length > 0) {
+          this.languageDetected = msg.language ? String(msg.language).toUpperCase() : 'UNKNOWN';
+          this.languageProbability = msg.language_probability || 0;
+          if (Array.isArray(msg.segments) && msg.segments.length > 0) {
             this.transcriptSegments = msg.segments;
           }
           this.transcribeMessage = '';
+          // Authoritative text supersedes the preview entirely.
+          this.liveTranscriptText = '';
+          this.liveSegmentCount = 0;
           break;
-          
+
         case 'error':
           if (msg.saved) this.saved = msg.saved;
           if (msg.stage === 'normalization') { this.normalizing = false; this.normalizeMessage = ''; }
@@ -188,15 +328,24 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
+    // ── helpers ──
+
     _newSessionId() {
       if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
       return 'sess-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
     },
 
     _pickMime() {
-      const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4'];
+      const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4',
+      ];
       if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
-      for (const c of candidates) { if (MediaRecorder.isTypeSupported(c)) return c; }
+      for (const candidate of candidates) {
+        if (MediaRecorder.isTypeSupported(candidate)) return candidate;
+      }
       return '';
     },
 
@@ -204,18 +353,28 @@ document.addEventListener('alpine:init', () => {
 
     _micErrorMessage(err) {
       switch (err && err.name) {
-        case 'NotAllowedError': return 'Microphone permission denied. Allow mic access for this site, then try again.';
-        case 'NotFoundError': case 'DevicesNotFoundError': return 'No microphone found. Connect one and reload the page.';
-        case 'NotReadableError': case 'TrackStartError': return 'Microphone is already in use by another application.';
-        case 'SecurityError': return 'Microphone requires a secure context. Open http://localhost:PORT, not an IP address.';
-        case 'OverconstrainedError': return 'Microphone does not support the requested audio constraints.';
-        default: return 'Microphone error: ' + this._errMessage(err);
+        case 'NotAllowedError':
+          return 'Microphone permission denied. Allow mic access for this site, then try again.';
+        case 'NotFoundError':
+        case 'DevicesNotFoundError':
+          return 'No microphone found. Connect one and reload the page.';
+        case 'NotReadableError':
+        case 'TrackStartError':
+          return 'Microphone is already in use by another application.';
+        case 'SecurityError':
+          return 'Microphone requires a secure context. Open http://localhost:PORT, not an IP address.';
+        case 'OverconstrainedError':
+          return 'Microphone does not support the requested audio constraints.';
+        default:
+          return 'Microphone error: ' + this._errMessage(err);
       }
     },
 
     _cleanupStream() {
       if (this._stream) {
-        this._stream.getTracks().forEach((track) => { try { track.stop(); } catch (e) { /* ignore */ } });
+        this._stream.getTracks().forEach((track) => {
+          try { track.stop(); } catch (e) { /* ignore */ }
+        });
         this._stream = null;
       }
     },
@@ -252,19 +411,24 @@ document.addEventListener('alpine:init', () => {
       return hz + ' Hz';
     },
 
+    // Full pipeline still running?
+    pipelineBusy() {
+      return this.connecting || this.recording || this.normalizing || this.vadRunning || this.transcribing;
+    },
+
+    // Status label for the header pill.
     pipelineLabel() {
-      if (this.connecting) return 'Connecting…';
-      if (this.recording) return 'Recording…';
-      if (this.normalizing) return 'Normalizing…';
-      if (this.vadRunning) return 'Detecting speech…';
-      if (this.transcribing) return 'Transcribing…';
+      if (this.connecting) return 'Connecting\u2026';
+      if (this.recording) {
+        // Surface preview liveness right in the status line.
+        return this.liveTranscriptText ? 'Recording\u2026 (live)' : 'Recording\u2026';
+      }
+      if (this.normalizing) return 'Normalizing\u2026';
+      if (this.vadRunning) return 'Detecting speech\u2026';
+      if (this.transcribing) return 'Transcribing\u2026';
       if (this.transcriptSegments.length > 0) return 'Ready';
       if (this.saved) return 'Saved';
       return 'Idle';
-    },
-
-    pipelineBusy() {
-      return this.connecting || this.recording || this.normalizing || this.vadRunning || this.transcribing;
     },
   }));
 });
