@@ -20,6 +20,19 @@ last_used_at throttling:
   with 60s TTL gates the write: at most one DB UPDATE per key per minute.
   Pattern: key_lastused:{fingerprint}
 
+CSRF posture (Phase 8 fix):
+  The decorator returns csrf_exempt(wrapper). Bearer endpoints are
+  intrinsically CSRF-safe: an attack depends on the browser attaching
+  AMBIENT credentials (cookies) to a cross-site request, and no browser
+  attaches an Authorization header unprompted. Leaving CsrfViewMiddleware
+  in the path added no security whatsoever - it made POST
+  /api/v1/transcriptions and DELETE /api/v1/jobs/<id>/cancel return 403 to
+  every non-browser client, i.e. it disabled the API for the platforms it
+  exists to serve. The browser kept working (it has the cookie), which is
+  why a phase of GET-only probes never surfaced it: GET/HEAD/OPTIONS/TRACE
+  are never CSRF-checked. Session-authenticated endpoints (/studio/*,
+  /account/*) are untouched by this module and keep full CSRF enforcement.
+
 Security notes:
   * The raw key is NEVER logged, stored in sessions, or echoed in errors.
   * Fingerprint lookup is O(1) (unique indexed column). No scanning.
@@ -37,6 +50,7 @@ import time
 from django.conf import settings
 from django.http import JsonResponse
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from studio.models import ApiKey
 
@@ -111,10 +125,20 @@ def api_key_required(view_func):
     On success: attaches request.api_key (ApiKey instance) and
     request.api_user (User instance) and calls the view.
 
-    On failure: returns a JsonResponse with 401 or 403 and does NOT
-    call the view. The error message never reveals whether the key
-    exists (timing oracle prevention): all failures say
+    On failure: returns a JsonResponse and does NOT call the view.
+    401 for every authentication problem (missing header, empty
+    token, unknown key, revoked key, hash mismatch) and 429 for rate
+    limiting. There is no 403 path: a 403 here would mean
+    CsrfViewMiddleware is back in the bearer path. The auth failure
+    message never reveals whether the key exists (timing-oracle
+    prevention): all such failures say
     "Invalid or revoked API key."
+
+    CSRF: the RETURNED callable is csrf_exempt - see the module
+    docstring. The attribute must land on the outermost callable,
+    because that is the one CsrfViewMiddleware inspects; applying it
+    to `view_func` or inside `wrapper` is invisible to the middleware
+    and is caught by scripts/guard_layers.py G4 via resolve().func.
     """
     @functools.wraps(view_func)
     def wrapper(request, *args, **kwargs):
@@ -184,4 +208,11 @@ def api_key_required(view_func):
 
         return view_func(request, *args, **kwargs)
 
-    return wrapper
+    # csrf_exempt MUST be applied to the callable we RETURN, not to
+    # view_func and not inside wrapper: CsrfViewMiddleware.process_view
+    # reads the attribute off the object the URL resolver hands back.
+    # functools.wraps already propagated __name__/__doc__ through
+    # wrapper, and csrf_exempt re-wraps with its own @wraps, so the
+    # resolved callback still reports the real view name - which is
+    # what guard_layers.py G4 asserts via resolve(path).func.
+    return csrf_exempt(wrapper)
