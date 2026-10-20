@@ -141,6 +141,28 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
 # to avoid clipping the first/last phoneme.
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "30"))
 
+# ─── Upload ingest + public API (Phases 7/8) ─────────────────────────────────
+# Both names were advertised in .env.example from Phase 7 but never read here,
+# so upload_service and api_auth fell through to their in-code fallbacks and
+# editing .env changed nothing. The phase.7+8 commit message recorded this as a
+# KNOWN GAP; reading them here closes it.
+#
+# UPLOAD_MAX_BYTES - a NO-OP by design. The default below is byte-identical to
+# upload_service._DEFAULT_MAX_BYTES, so a deployment without this line behaves
+# exactly as it did before. It exists so the documented knob is real.
+UPLOAD_MAX_BYTES = int(os.getenv("UPLOAD_MAX_BYTES", str(100 * 1024 * 1024)))
+
+# UPLOAD_RATE_LIMIT_PER_MINUTE - a DELIBERATE RAISE, not a no-op. The in-code
+# fallback in api_auth is 10, and 10/min is incompatible with this API's own
+# documented contract ("poll GET /api/v1/jobs/{id} until state is terminal"):
+# a 2 s poller needs 30/min and studio.js polls at 1.5 s (40/min), so the old
+# default throttled legitimate traffic within ~15 s of polling. 120/min = one
+# request per 2 s, which admits every documented poller and still refuses
+# credential stuffing (hundreds per second). The number is derived from the
+# pollers' own intervals rather than chosen. api_auth's fallback stays 10 as a
+# last resort if this attribute is ever removed.
+UPLOAD_RATE_LIMIT_PER_MINUTE = int(os.getenv("UPLOAD_RATE_LIMIT_PER_MINUTE", "120"))
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ─── Authentication ────────────────────────────────────────────────────────
