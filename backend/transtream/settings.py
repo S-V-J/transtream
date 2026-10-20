@@ -21,11 +21,30 @@ ALLOWED_HOSTS = [
     if host.strip()
 ]
 
+# Default local development CSRF origins.
+# The transtream CLI will override this dynamically for the selected port.
+_DEFAULT_CSRF_ORIGINS = ",".join(
+    [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8000",
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
+        "http://[::1]:8001",
+        "http://localhost:8002",
+        "http://127.0.0.1:8002",
+        "http://[::1]:8002",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+    ]
+)
+
 CSRF_TRUSTED_ORIGINS = [
     origin.strip()
     for origin in os.getenv(
         "DJANGO_CSRF_TRUSTED_ORIGINS",
-        "http://localhost:8000,http://127.0.0.1:8000",
+        _DEFAULT_CSRF_ORIGINS,
     ).split(",")
     if origin.strip()
 ]
@@ -96,11 +115,8 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-
 TIME_ZONE = "UTC"
-
 USE_I18N = True
-
 USE_TZ = True
 
 STATIC_URL = "static/"
@@ -112,6 +128,18 @@ MEDIA_ROOT = REPO_ROOT / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# ─── Authentication ───────────────────────────────────────────────────────
+LOGIN_URL = "/accounts/login/"
+LOGIN_REDIRECT_URL = "/studio/"
+LOGOUT_REDIRECT_URL = "/accounts/login/"
+
+# ─── Local development cookie security ─────────────────────────────────────
+if DEBUG:
+    CSRF_COOKIE_SECURE = False
+    SESSION_COOKIE_SECURE = False
+    SECURE_SSL_REDIRECT = False
+
+# ─── Channels / Redis ──────────────────────────────────────────────────────
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
 
 CHANNEL_LAYERS = {

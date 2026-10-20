@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── TranStream CLI — Dynamic Port Edition ──────────────────────────────────
+# ─── TranStream CLI — Robust Dynamic Port Edition ───────────────────────────
 #
-#   transtream start       Find free port → start Redis (if needed) → Daphne
-#   transtream stop        Stop Daphne (and Redis only if we started it)
+#   transtream start       Find free port → start Redis if needed → start Daphne
+#   transtream stop        Stop Daphne and Redis only if this script started them
 #   transtream restart     Stop → start
-#   transtream status      Show port, PIDs, bindings, auto-run state
-#   transtream logs        Tail daphne.log + redis.log
-#   transtream enable      Install systemd user service (auto-run on login)
+#   transtream status      Show port, process/unit state, bindings, auto-run state
+#   transtream logs        Tail Daphne logs
+#   transtream enable      Install systemd user service for optional auto-run
 #   transtream disable     Remove systemd user service
-#   transtream help        Show this help
+#   transtream help        Show help
 #
 # Rules:
 #   • NEVER kills a process it did not start.
-#   • Default preferred port: 8000 (override: TRANSTREAM_PORT=NNNN).
-#   • If preferred port is busy, scans upward until a free port is found.
-#   • Chosen port is saved to logs/transtream.port for stop/status.
-#   • No auto-run by default. enable/disable is opt-in.
+#   • Default preferred port: 8000.
+#   • If preferred port is busy, scans upward for first free port.
+#   • Uses systemd user transient service when available.
+#   • Falls back to setsid/nohup when systemd user is unavailable.
+#   • No auto-run by default.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -26,14 +27,17 @@ PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/venv"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_DIR="$PROJECT_DIR/logs"
+
 PID_FILE="$LOG_DIR/daphne.pid"
 REDIS_PID_FILE="$LOG_DIR/redis.pid"
 PORT_FILE="$LOG_DIR/transtream.port"
+UNIT_FILE="$LOG_DIR/daphne.unit"
 
 PREFERRED_PORT="${TRANSTREAM_PORT:-8000}"
 APP_HOST="${TRANSTREAM_HOST:-127.0.0.1}"
 REDIS_PORT="${TRANSTREAM_REDIS_PORT:-6379}"
 
+APP_UNIT_PREFIX="transtream-app"
 SERVICE_NAME="transtream"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 USER_SERVICE_FILE="$USER_SERVICE_DIR/${SERVICE_NAME}.service"
@@ -49,10 +53,11 @@ ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
-# ─── Port helpers ───────────────────────────────────────────────────────────
+ensure_dirs() {
+    mkdir -p "$LOG_DIR"
+}
 
 port_in_use() {
-    # Returns 0 (true) if something is listening on $1
     python3 -c "
 import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -80,18 +85,16 @@ find_free_port() {
 }
 
 resolve_port() {
-    # If a previous run saved a port and it's still ours, reuse it.
-    # Otherwise find a new free port starting from PREFERRED_PORT.
-
     if [ -f "$PORT_FILE" ]; then
         local saved
         saved=$(cat "$PORT_FILE" 2>/dev/null || echo "")
-        if [ -n "$saved" ] && [ "$saved" -eq "$saved" ] 2>/dev/null; then
+
+        if [[ "$saved" =~ ^[0-9]+$ ]]; then
             if ! port_in_use "$saved"; then
                 echo "$saved"
                 return 0
             fi
-            # Saved port now busy (foreign process grabbed it) → find new
+
             warn "Saved port $saved is now occupied. Scanning for a new free port..."
         fi
     fi
@@ -101,25 +104,26 @@ resolve_port() {
         err "No free port found in range $PREFERRED_PORT–$((PREFERRED_PORT + 200))."
         exit 1
     }
+
     echo "$found"
 }
 
-# ─── Directory / venv ──────────────────────────────────────────────────────
+csrf_origins_for_port() {
+    local port="$1"
+    local origins="http://localhost:${port},http://127.0.0.1:${port},http://[::1]:${port}"
 
-ensure_dirs() {
-    mkdir -p "$LOG_DIR"
-}
-
-activate_venv() {
-    if [ ! -d "$VENV_DIR" ]; then
-        err "Virtual environment not found at $VENV_DIR"
-        exit 1
+    if [ "$APP_HOST" != "127.0.0.1" ] && [ "$APP_HOST" != "localhost" ] && [ "$APP_HOST" != "0.0.0.0" ]; then
+        origins="${origins},http://${APP_HOST}:${port}"
     fi
-    # shellcheck disable=SC1091
-    source "$VENV_DIR/bin/activate"
+
+    echo "$origins"
 }
 
-# ─── Redis ─────────────────────────────────────────────────────────────────
+has_systemd_user() {
+    command -v systemctl >/dev/null 2>&1 &&
+    command -v systemd-run >/dev/null 2>&1 &&
+    systemctl --user show-environment >/dev/null 2>&1
+}
 
 redis_is_running() {
     redis-cli -p "$REDIS_PORT" ping >/dev/null 2>&1
@@ -132,6 +136,7 @@ start_redis_if_needed() {
     fi
 
     info "Starting Redis on port $REDIS_PORT..."
+
     redis-server \
         --daemonize yes \
         --port "$REDIS_PORT" \
@@ -156,105 +161,208 @@ stop_redis_if_we_started() {
     if [ -f "$REDIS_PID_FILE" ]; then
         local pid
         pid=$(cat "$REDIS_PID_FILE")
+
         if kill -0 "$pid" 2>/dev/null; then
             info "Stopping Redis (PID: $pid)..."
             kill "$pid" 2>/dev/null || true
             sleep 1
             ok "Redis stopped"
         fi
+
         rm -f "$REDIS_PID_FILE"
     else
         warn "Redis was not started by this script. Leaving it alone."
     fi
 }
 
-# ─── Daphne ────────────────────────────────────────────────────────────────
-
-daphne_is_running() {
+fallback_pid_running() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE")
         kill -0 "$pid" 2>/dev/null && return 0
     fi
+
     return 1
 }
 
-start_daphne() {
-    if daphne_is_running; then
-        warn "Daphne already running (PID: $(cat "$PID_FILE"))"
-        return 0
-    fi
+write_persistent_unit() {
+    local port="$1"
+    local origins
+    origins=$(csrf_origins_for_port "$port")
 
+    mkdir -p "$USER_SERVICE_DIR"
+
+    cat > "$USER_SERVICE_FILE" <<EOF
+[Unit]
+Description=TranStream ASGI Application
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BACKEND_DIR
+ExecStart=$VENV_DIR/bin/daphne -b $APP_HOST -p $port transtream.asgi:application
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:$LOG_DIR/daphne.log
+StandardError=append:$LOG_DIR/daphne-error.log
+Environment=PYTHONUNBUFFERED=1
+Environment=DJANGO_SETTINGS_MODULE=transtream.settings
+Environment="DJANGO_CSRF_TRUSTED_ORIGINS=${origins}"
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+start_daphne() {
     if [ ! -f "$BACKEND_DIR/manage.py" ]; then
         err "backend/manage.py not found. Create the Django project first."
         exit 1
     fi
 
-    activate_venv
+    if [ ! -x "$VENV_DIR/bin/daphne" ]; then
+        err "Daphne executable not found at $VENV_DIR/bin/daphne"
+        err "Activate venv and install requirements first."
+        exit 1
+    fi
+
     ensure_dirs
 
     local port
     port=$(resolve_port)
     echo "$port" > "$PORT_FILE"
 
-    info "Starting Daphne ASGI server on http://$APP_HOST:$port ..."
-    cd "$BACKEND_DIR"
+    local origins
+    origins=$(csrf_origins_for_port "$port")
 
-    nohup daphne -b "$APP_HOST" -p "$port" \
-        transtream.asgi:application \
-        >> "$LOG_DIR/daphne.log" 2>&1 &
+    if has_systemd_user; then
+        local unit
+        unit="${APP_UNIT_PREFIX}-$(date +%s)-$$"
+        echo "$unit" > "$UNIT_FILE"
 
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
+        info "Starting Daphne as systemd user unit: $unit"
+        info "Access: http://$APP_HOST:$port/"
 
-    sleep 2
+        systemd-run --user --quiet \
+            --unit="$unit" \
+            --working-directory="$BACKEND_DIR" \
+            --setenv=PYTHONUNBUFFERED=1 \
+            --setenv=DJANGO_SETTINGS_MODULE=transtream.settings \
+            --setenv="DJANGO_CSRF_TRUSTED_ORIGINS=${origins}" \
+            --property=StandardOutput=append:"$LOG_DIR/daphne.log" \
+            --property=StandardError=append:"$LOG_DIR/daphne-error.log" \
+            "$VENV_DIR/bin/daphne" \
+                -b "$APP_HOST" \
+                -p "$port" \
+                transtream.asgi:application
 
-    if kill -0 "$pid" 2>/dev/null; then
-        ok "Daphne started (PID: $pid, port: $port)"
-        info "Access: http://localhost:$port/"
+        sleep 2
+
+        if systemctl --user is-active --quiet "$unit"; then
+            ok "Daphne started under systemd user unit $unit"
+            info "Use: transtream status"
+            info "Use: transtream logs"
+        else
+            err "Daphne systemd unit failed to stay active."
+            err "Recent journal:"
+            journalctl --user -u "$unit" -n 80 --no-pager >&2 || true
+
+            rm -f "$UNIT_FILE" "$PORT_FILE"
+            exit 1
+        fi
     else
-        err "Daphne failed to start. Last 30 lines of log:"
-        tail -n 30 "$LOG_DIR/daphne.log" >&2 || true
-        rm -f "$PID_FILE" "$PORT_FILE"
-        exit 1
+        warn "systemd user session not available. Using setsid/nohup fallback."
+
+        info "Starting Daphne fallback process on http://$APP_HOST:$port ..."
+
+        cd "$BACKEND_DIR"
+
+        if command -v setsid >/dev/null 2>&1; then
+            setsid nohup "$VENV_DIR/bin/daphne" \
+                -b "$APP_HOST" \
+                -p "$port" \
+                transtream.asgi:application \
+                </dev/null \
+                >> "$LOG_DIR/daphne.log" \
+                2>&1 &
+        else
+            nohup "$VENV_DIR/bin/daphne" \
+                -b "$APP_HOST" \
+                -p "$port" \
+                transtream.asgi:application \
+                </dev/null \
+                >> "$LOG_DIR/daphne.log" \
+                2>&1 &
+        fi
+
+        local pid=$!
+        echo "$pid" > "$PID_FILE"
+
+        disown "$pid" 2>/dev/null || true
+
+        sleep 2
+
+        if kill -0 "$pid" 2>/dev/null; then
+            ok "Daphne started (PID: $pid)"
+            info "Access: http://localhost:$port/"
+        else
+            err "Daphne fallback process failed to start."
+            err "Recent log:"
+            tail -n 50 "$LOG_DIR/daphne.log" >&2 || true
+
+            rm -f "$PID_FILE" "$PORT_FILE"
+            exit 1
+        fi
     fi
 }
 
 stop_daphne() {
-    # Also stop systemd user service if active
-    if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-        info "Stopping systemd user service $SERVICE_NAME..."
-        systemctl --user stop "$SERVICE_NAME" || true
+    ensure_dirs
+
+    # Stop transient systemd unit if recorded.
+    if has_systemd_user && [ -f "$UNIT_FILE" ]; then
+        local unit
+        unit=$(cat "$UNIT_FILE" 2>/dev/null || echo "")
+
+        if [ -n "$unit" ]; then
+            info "Stopping systemd user unit: $unit"
+            systemctl --user stop "$unit" >/dev/null 2>&1 || true
+        fi
+
+        rm -f "$UNIT_FILE"
     fi
 
-    if ! daphne_is_running; then
-        warn "Daphne is not running (no valid PID file)."
+    # Stop persistent systemd service if present.
+    if has_systemd_user; then
+        systemctl --user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+
+    # Stop fallback PID if present.
+    if fallback_pid_running; then
+        local pid
+        pid=$(cat "$PID_FILE")
+
+        info "Stopping fallback Daphne process (PID: $pid)..."
+        kill "$pid" 2>/dev/null || true
+        sleep 2
+
+        if kill -0 "$pid" 2>/dev/null; then
+            warn "Force killing fallback Daphne process (PID: $pid)..."
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+
         rm -f "$PID_FILE"
-        return 0
+        ok "Fallback Daphne stopped"
+    else
+        rm -f "$PID_FILE"
     fi
-
-    local pid
-    pid=$(cat "$PID_FILE")
-
-    info "Stopping Daphne (PID: $pid)..."
-    kill "$pid" 2>/dev/null || true
-    sleep 2
-
-    if kill -0 "$pid" 2>/dev/null; then
-        warn "Force killing Daphne (PID: $pid)..."
-        kill -9 "$pid" 2>/dev/null || true
-    fi
-
-    rm -f "$PID_FILE"
-    ok "Daphne stopped"
 }
-
-# ─── Commands ──────────────────────────────────────────────────────────────
 
 cmd_start() {
     ensure_dirs
     start_redis_if_needed
     start_daphne
+
     echo ""
     ok "TranStream is running."
     info "Logs: $LOG_DIR/"
@@ -263,6 +371,7 @@ cmd_start() {
 cmd_stop() {
     stop_daphne
     stop_redis_if_we_started
+
     echo ""
     ok "TranStream stopped."
 }
@@ -274,6 +383,8 @@ cmd_restart() {
 }
 
 cmd_status() {
+    ensure_dirs
+
     local port="?"
     [ -f "$PORT_FILE" ] && port=$(cat "$PORT_FILE")
 
@@ -291,9 +402,39 @@ cmd_status() {
         err "Redis  : NOT RUNNING"
     fi
 
-    if daphne_is_running; then
-        ok "Daphne : RUNNING (PID: $(cat "$PID_FILE"), port: $port)"
-    else
+    local daphne_running=false
+
+    if has_systemd_user && [ -f "$UNIT_FILE" ]; then
+        local unit
+        unit=$(cat "$UNIT_FILE" 2>/dev/null || echo "")
+
+        if [ -n "$unit" ]; then
+            if systemctl --user is-active --quiet "$unit"; then
+                daphne_running=true
+                local main_pid
+                main_pid=$(systemctl --user show -p MainPID --value "$unit" 2>/dev/null || echo "?")
+
+                ok "Daphne : RUNNING as systemd user unit $unit"
+                info "MainPID: $main_pid"
+            else
+                warn "Daphne : systemd user unit $unit is not active"
+            fi
+        fi
+    fi
+
+    if has_systemd_user; then
+        if systemctl --user is-active --quiet "$SERVICE_NAME"; then
+            daphne_running=true
+            ok "Daphne : RUNNING as persistent systemd service $SERVICE_NAME"
+        fi
+    fi
+
+    if fallback_pid_running; then
+        daphne_running=true
+        ok "Daphne : RUNNING as fallback process (PID: $(cat "$PID_FILE"))"
+    fi
+
+    if [ "$daphne_running" = false ]; then
         warn "Daphne : NOT RUNNING"
     fi
 
@@ -305,10 +446,14 @@ cmd_status() {
     ss -ltnp 2>/dev/null | grep ":${REDIS_PORT} " || echo "  (none)"
 
     echo ""
-    if systemctl --user is-enabled "$SERVICE_NAME" 2>/dev/null; then
-        ok "Auto-run (systemd user service): ENABLED"
+    if has_systemd_user; then
+        if systemctl --user is-enabled "$SERVICE_NAME" 2>/dev/null; then
+            ok "Auto-run persistent systemd service: ENABLED"
+        else
+            info "Auto-run persistent systemd service: DISABLED (default)"
+        fi
     else
-        info "Auto-run (systemd user service): DISABLED (default)"
+        info "systemd user session: NOT AVAILABLE"
     fi
 
     echo "─────────────────────────────────────────"
@@ -316,89 +461,132 @@ cmd_status() {
 
 cmd_logs() {
     ensure_dirs
+
+    if has_systemd_user && [ -f "$UNIT_FILE" ]; then
+        local unit
+        unit=$(cat "$UNIT_FILE" 2>/dev/null || echo "")
+
+        if [ -n "$unit" ]; then
+            if systemctl --user is-active --quiet "$unit"; then
+                info "Following systemd journal for unit: $unit"
+                journalctl --user -u "$unit" -f
+            else
+                info "Showing recent systemd journal for inactive unit: $unit"
+                journalctl --user -u "$unit" -n 120 --no-pager
+            fi
+
+            return 0
+        fi
+    fi
+
+    if has_systemd_user && systemctl --user is-active --quiet "$SERVICE_NAME"; then
+        info "Following systemd journal for persistent service: $SERVICE_NAME"
+        journalctl --user -u "$SERVICE_NAME" -f
+        return 0
+    fi
+
     touch "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
-    info "Tailing logs (Ctrl+C to stop)..."
+
+    info "Tailing log files (Ctrl+C to stop)..."
     tail -f "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
 }
 
 cmd_enable() {
-    info "Enabling auto-run via systemd user service..."
-    mkdir -p "$USER_SERVICE_DIR"
+    if ! has_systemd_user; then
+        err "systemd user session is not available."
+        err "Cannot enable auto-run."
+        exit 1
+    fi
 
-    local port="8000"
-    [ -f "$PORT_FILE" ] && port=$(cat "$PORT_FILE")
+    ensure_dirs
 
-    cat > "$USER_SERVICE_FILE" <<EOF
-[Unit]
-Description=TranStream ASGI Application
-After=network.target
+    local port
+    if [ -f "$PORT_FILE" ]; then
+        port=$(cat "$PORT_FILE")
+    else
+        port=$(find_free_port "$PREFERRED_PORT") || {
+            err "No free port found in range $PREFERRED_PORT–$((PREFERRED_PORT + 200))."
+            exit 1
+        }
+        echo "$port" > "$PORT_FILE"
+    fi
 
-[Service]
-Type=simple
-WorkingDirectory=$BACKEND_DIR
-ExecStart=$VENV_DIR/bin/daphne -b $APP_HOST -p $port transtream.asgi:application
-Restart=on-failure
-RestartSec=5
-StandardOutput=append:$LOG_DIR/daphne.log
-StandardError=append:$LOG_DIR/daphne-error.log
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
-EOF
+    write_persistent_unit "$port"
 
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME"
 
-    ok "Auto-run ENABLED on port $port. TranStream will start on login."
-    info "Start now : systemctl --user start $SERVICE_NAME"
-    info "Disable   : transtream disable"
+    ok "Auto-run ENABLED on port $port."
+    info "TranStream will start on login."
+    info "Start now manually: systemctl --user start $SERVICE_NAME"
+    info "Disable later:      transtream disable"
 }
 
 cmd_disable() {
+    if ! has_systemd_user; then
+        warn "systemd user session is not available."
+        rm -f "$USER_SERVICE_FILE"
+        ok "Auto-run DISABLED."
+        return 0
+    fi
+
     info "Disabling auto-run..."
+
     systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
     systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
     rm -f "$USER_SERVICE_FILE"
     systemctl --user daemon-reload
+
     ok "Auto-run DISABLED. TranStream will NOT start automatically."
 }
 
 cmd_help() {
     cat <<EOF
-TranStream CLI — Application Management (Dynamic Port Edition)
+TranStream CLI — Robust Dynamic Port Edition
 
 Usage:
   transtream <command>
 
 Commands:
-  start       Find free port → start Redis (if needed) → start Daphne
-  stop        Stop Daphne (and Redis only if we started it)
+  start       Find free port → start Redis if needed → start Daphne
+  stop        Stop Daphne and Redis only if this script started them
   restart     Stop → start
-  status      Show port, PIDs, bindings, auto-run state
-  logs        Tail application log files
-  enable      Install systemd user service for auto-start on login
-  disable     Remove systemd user service (default: no auto-run)
+  status      Show port, process/unit state, bindings, auto-run state
+  logs        Tail Daphne logs
+  enable      Install systemd user service for optional auto-run
+  disable     Remove systemd user service
   help        Show this help message
 
 Port behavior:
-  • Preferred port: $PREFERRED_PORT (override: TRANSTREAM_PORT=NNNN)
-  • If busy, scans upward (max +200) for first free port.
-  • Chosen port saved to: $PORT_FILE
+  • Preferred port: $PREFERRED_PORT
+  • Override: TRANSTREAM_PORT=9000 transtream start
+  • If busy, scans upward for first free port.
+  • Selected port saved to: $PORT_FILE
+
+Host behavior:
+  • Default bind: $APP_HOST
+  • Override: TRANSTREAM_HOST=0.0.0.0 transtream start
+
+Redis behavior:
+  • Uses existing Redis if port $REDIS_PORT responds.
+  • Starts local Redis only if not already running.
+  • Stops Redis only if this script started it.
+
+Process behavior:
+  • Uses systemd user transient service when available.
+  • Falls back to setsid/nohup when systemd user is unavailable.
   • NEVER kills a process it did not start.
 
-Environment overrides:
-  TRANSTREAM_PORT=8080       Preferred starting port
-  TRANSTREAM_HOST=0.0.0.0    Bind address
-  TRANSTREAM_REDIS_PORT=6380 Redis port
+Auto-run:
+  • Disabled by default.
+  • Use: transtream enable
+  • Use: transtream disable
 
 Project dir : $PROJECT_DIR
 Script path : $SCRIPT_PATH
 Log dir     : $LOG_DIR
 EOF
 }
-
-# ─── Dispatcher ───────────────────────────────────────────────────────────
 
 case "${1:-help}" in
     start)   cmd_start ;;
