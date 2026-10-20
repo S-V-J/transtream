@@ -110,23 +110,27 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
+STATIC_URL = "/static/"
 STATIC_ROOT = REPO_ROOT / "staticfiles"
 STATICFILES_DIRS = [REPO_ROOT / "frontend" / "static"]
 
-MEDIA_URL = "media/"
+MEDIA_URL = "/media/"
 MEDIA_ROOT = REPO_ROOT / "media"
 
 # ─── TranStream Studio Storage ─────────────────────────────────────────────
 RECORDINGS_DIR = MEDIA_ROOT / "recordings"
 
 # Maximum raw audio accepted for one take before backend force-saves and stops.
-# 512 MB is generous for local development and long raw captures.
 STUDIO_MAX_TAKE_BYTES = 512 * 1024 * 1024
 
 # Send live stats to browser every N received binary chunks.
-# With 100 ms chunks, 20 chunks ≈ 2 seconds.
 STUDIO_STATS_EVERY_CHUNKS = 20
+
+# ─── FFmpeg / Audio Normalization (Phase 3) ────────────────────────────────
+FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "300"))
+AUDIO_SAMPLE_RATE = int(os.getenv("AUDIO_SAMPLE_RATE", "16000"))
+AUDIO_CHANNELS = int(os.getenv("AUDIO_CHANNELS", "1"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

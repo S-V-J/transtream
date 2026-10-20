@@ -10,6 +10,12 @@ from asgiref.sync import sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 from django.conf import settings
 
+from studio.audio_service import (
+    AudioNormalizationError,
+    normalize_audio,
+    normalized_output_path,
+)
+
 logger = logging.getLogger(__name__)
 
 MIME_EXTENSIONS = {
@@ -139,19 +145,26 @@ class SessionWriter:
     def as_dict(self):
         url = ""
         filename = ""
+        abs_path = ""
 
         if self.final_path is not None:
             filename = self.final_path.name
+            abs_path = str(self.final_path)
 
             try:
                 relative = self.final_path.relative_to(Path(settings.MEDIA_ROOT))
             except ValueError:
                 relative = Path("recordings") / self.final_path.name
 
-            url = f"{settings.MEDIA_URL}{relative.as_posix()}"
+            media_url = settings.MEDIA_URL
+            if not media_url.startswith("/"):
+                media_url = "/" + media_url
+
+            url = f"{media_url}{relative.as_posix()}"
 
         return {
             "filename": filename,
+            "path": abs_path,
             "url": url,
             "bytes": self.bytes_written,
             "chunks": self.chunk_count,
@@ -162,7 +175,7 @@ class SessionWriter:
 
 class AudioConsumer(AsyncWebsocketConsumer):
     """
-    Phase 2 WebSocket consumer.
+    Phase 2 + 3 WebSocket consumer.
 
     Receives:
     - JSON control messages:
@@ -175,7 +188,9 @@ class AudioConsumer(AsyncWebsocketConsumer):
     - connected
     - started
     - stats
-    - saved
+    - saved          (raw file persisted)
+    - normalizing    (FFmpeg started, Phase 3)
+    - normalized     (FFmpeg completed, Phase 3)
     - error
     """
 
@@ -191,14 +206,13 @@ class AudioConsumer(AsyncWebsocketConsumer):
 
         await self.accept()
 
-        await self.send_json(
-            {
-                "type": "connected",
-                "session_id": self.session_id,
-                "message": "TranStream WebSocket consumer is ready.",
-                "max_bytes": settings.STUDIO_MAX_TAKE_BYTES,
-            }
-        )
+        await self._safe_send({
+            "type": "connected",
+            "session_id": self.session_id,
+            "message": "TranStream WebSocket consumer is ready.",
+            "max_bytes": settings.STUDIO_MAX_TAKE_BYTES,
+            "ffmpeg_available": True,
+        })
 
     async def disconnect(self, close_code):
         if hasattr(self, "group_name"):
@@ -216,8 +230,12 @@ class AudioConsumer(AsyncWebsocketConsumer):
                     info["filename"],
                 )
 
-    async def send_json(self, payload):
-        await self.send(text_data=json.dumps(payload))
+    async def _safe_send(self, payload):
+        """Send JSON, silently ignore if WebSocket is already closed."""
+        try:
+            await self.send(text_data=json.dumps(payload))
+        except Exception:
+            pass
 
     async def receive(self, text_data=None, bytes_data=None):
         if text_data is not None:
@@ -232,12 +250,10 @@ class AudioConsumer(AsyncWebsocketConsumer):
         try:
             payload = json.loads(text_data)
         except json.JSONDecodeError:
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": "Invalid JSON control message.",
-                }
-            )
+            await self._safe_send({
+                "type": "error",
+                "message": "Invalid JSON control message.",
+            })
             return
 
         control_type = payload.get("type")
@@ -247,25 +263,20 @@ class AudioConsumer(AsyncWebsocketConsumer):
         elif control_type == "stop":
             await self.handle_stop(payload)
         else:
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": f"Unsupported control type: {control_type}",
-                }
-            )
+            await self._safe_send({
+                "type": "error",
+                "message": f"Unsupported control type: {control_type}",
+            })
 
     async def handle_start(self, payload):
-        # If a previous writer is somehow still open, finalize it first.
         if self.writer is not None and not self.writer.closed:
             old_info = await self.writer.finalize()
 
             if old_info["filename"]:
-                await self.send_json(
-                    {
-                        "type": "saved",
-                        **old_info,
-                    }
-                )
+                await self._safe_send({
+                    "type": "saved",
+                    **old_info,
+                })
 
         mime = payload.get("mime") or "audio/webm"
 
@@ -277,61 +288,109 @@ class AudioConsumer(AsyncWebsocketConsumer):
 
         await self.writer.open()
 
-        await self.send_json(
-            {
-                "type": "started",
-                "session_id": self.session_id,
-                "mime": self.writer.mime,
-                "extension": self.writer.ext,
-                "max_bytes": settings.STUDIO_MAX_TAKE_BYTES,
-            }
-        )
+        await self._safe_send({
+            "type": "started",
+            "session_id": self.session_id,
+            "mime": self.writer.mime,
+            "extension": self.writer.ext,
+            "max_bytes": settings.STUDIO_MAX_TAKE_BYTES,
+        })
 
     async def handle_stop(self, payload):
         if self.writer is None or self.writer.closed:
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": "No active recording to stop.",
-                }
-            )
+            await self._safe_send({
+                "type": "error",
+                "message": "No active recording to stop.",
+            })
             return
 
         info = await self.writer.finalize()
         self.writer = None
 
-        await self.send_json(
-            {
-                "type": "stats",
-                "chunks": info["chunks"],
-                "bytes": info["bytes"],
-                "duration_ms": info["duration_ms"],
-            }
-        )
+        await self._safe_send({
+            "type": "stats",
+            "chunks": info["chunks"],
+            "bytes": info["bytes"],
+            "duration_ms": info["duration_ms"],
+        })
 
         if info["filename"]:
-            await self.send_json(
-                {
-                    "type": "saved",
-                    **info,
-                }
-            )
+            await self._safe_send({
+                "type": "saved",
+                **info,
+            })
+
+            # Phase 3: trigger FFmpeg normalization
+            if info.get("path"):
+                await self._trigger_normalization(Path(info["path"]))
         else:
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": "Recording stopped, but no audio data was received.",
-                }
+            await self._safe_send({
+                "type": "error",
+                "message": "Recording stopped, but no audio data was received.",
+            })
+
+    async def _trigger_normalization(self, raw_path: Path):
+        """
+        Run FFmpeg normalization on the saved raw file.
+
+        Sends 'normalizing' before start, then 'normalized' on success
+        or 'error' on failure. The raw file is always preserved.
+        """
+        output_path = normalized_output_path(raw_path)
+
+        await self._safe_send({
+            "type": "normalizing",
+            "input_file": raw_path.name,
+            "output_file": output_path.name,
+            "message": (
+                f"Normalizing to {settings.AUDIO_SAMPLE_RATE} Hz, "
+                f"{settings.AUDIO_CHANNELS} ch, 16-bit PCM WAV…"
+            ),
+        })
+
+        try:
+            result = await normalize_audio(raw_path, output_path)
+
+            await self._safe_send({
+                "type": "normalized",
+                **result,
+            })
+
+        except AudioNormalizationError as exc:
+            logger.warning(
+                "Normalization failed for %s: %s",
+                raw_path.name,
+                exc,
             )
+
+            await self._safe_send({
+                "type": "error",
+                "message": f"Normalization failed: {exc}",
+                "stage": "normalization",
+                "raw_saved": True,
+                "raw_file": raw_path.name,
+            })
+
+        except Exception as exc:
+            logger.exception(
+                "Unexpected error during normalization of %s",
+                raw_path.name,
+            )
+
+            await self._safe_send({
+                "type": "error",
+                "message": f"Normalization error: {exc}",
+                "stage": "normalization",
+                "raw_saved": True,
+                "raw_file": raw_path.name,
+            })
 
     async def receive_audio(self, data):
         if self.writer is None or self.writer.closed:
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": "Audio received before start control message.",
-                }
-            )
+            await self._safe_send({
+                "type": "error",
+                "message": "Audio received before start control message.",
+            })
             return
 
         incoming_size = len(data)
@@ -341,13 +400,15 @@ class AudioConsumer(AsyncWebsocketConsumer):
             info = await self.writer.finalize()
             self.writer = None
 
-            await self.send_json(
-                {
-                    "type": "error",
-                    "message": "Maximum recording size reached. Partial audio saved.",
-                    "saved": info,
-                }
-            )
+            await self._safe_send({
+                "type": "error",
+                "message": "Maximum recording size reached. Partial audio saved.",
+                "saved": info,
+            })
+
+            if info.get("path"):
+                await self._trigger_normalization(Path(info["path"]))
+
             return
 
         await self.writer.write_chunk(data)
@@ -355,11 +416,9 @@ class AudioConsumer(AsyncWebsocketConsumer):
         every = getattr(settings, "STUDIO_STATS_EVERY_CHUNKS", 20)
 
         if self.writer.chunk_count % every == 0:
-            await self.send_json(
-                {
-                    "type": "stats",
-                    "chunks": self.writer.chunk_count,
-                    "bytes": self.writer.bytes_written,
-                    "duration_ms": self.writer.current_duration_ms(),
-                }
-            )
+            await self._safe_send({
+                "type": "stats",
+                "chunks": self.writer.chunk_count,
+                "bytes": self.writer.bytes_written,
+                "duration_ms": self.writer.current_duration_ms(),
+            })

@@ -1,7 +1,8 @@
-// ─── TranStream Studio recorder component (Phase 2) ────────────────────────
+// ─── TranStream Studio recorder component (Phase 2 + 3) ────────────────────
 //
 // Browser microphone -> MediaRecorder 100 ms slices -> WebSocket binary frames
-// -> Django Channels AudioConsumer -> incremental temp file -> raw recording.
+// -> Django Channels AudioConsumer -> incremental temp file -> raw recording
+// -> FFmpeg normalization -> 16 kHz mono PCM WAV.
 //
 // Ordering guarantee:
 // Every slice is pushed through a serialized promise queue so binary frames
@@ -17,6 +18,11 @@ document.addEventListener('alpine:init', () => {
     saved: null,
     sessionId: '',
     nativeScript: false,
+
+    // ── Phase 3: normalization state ──
+    normalizing: false,
+    normalized: null,
+    normalizeMessage: '',
 
     // ── counters ─
     chunksSent: 0,
@@ -64,6 +70,11 @@ document.addEventListener('alpine:init', () => {
 
       this.error = null;
       this.saved = null;
+
+      // Reset Phase 3 normalization state
+      this.normalizing = false;
+      this.normalized = null;
+      this.normalizeMessage = '';
 
       this.chunksSent = 0;
       this.chunksReceived = 0;
@@ -306,9 +317,29 @@ document.addEventListener('alpine:init', () => {
           this.saved = msg;
           break;
 
+        // ── Phase 3: normalization ──
+
+        case 'normalizing':
+          this.normalizing = true;
+          this.normalized = null;
+          this.normalizeMessage = msg.message || 'Normalizing audio…';
+          break;
+
+        case 'normalized':
+          this.normalizing = false;
+          this.normalized = msg;
+          this.normalizeMessage = '';
+          break;
+
         case 'error':
           if (msg.saved) {
             this.saved = msg.saved;
+          }
+
+          // If normalization failed, clear the normalizing flag
+          if (msg.stage === 'normalization') {
+            this.normalizing = false;
+            this.normalizeMessage = '';
           }
 
           this.error = msg.message || 'Server error.';
@@ -426,6 +457,16 @@ document.addEventListener('alpine:init', () => {
       }
 
       return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + ' ' + units[i];
+    },
+
+    fmtSampleRate(hz) {
+      hz = Number(hz) || 0;
+
+      if (hz >= 1000) {
+        return (hz / 1000).toFixed(hz % 1000 === 0 ? 0 : 1) + ' kHz';
+      }
+
+      return hz + ' Hz';
     },
   }));
 });
