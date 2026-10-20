@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}About App | TranStream{% endblock %}
+
+{% block content %}
+<section class="rounded-2xl border border-white/10 bg-slate-900/60 p-6 shadow-xl shadow-black/20">
+  <h2 class="mb-4 text-2xl font-semibold tracking-tight">About TranStream</h2>
+
+  <p class="max-w-3xl text-sm leading-7 text-slate-300">
+    TranStream is a local-first audio studio for real-time microphone
+    transcription, uploaded audio transcription, language detection,
+    translation, and text-to-speech playback.
+  </p>
+
+  <div class="mt-6 grid gap-4 md:grid-cols-2">
+    <div class="rounded-xl border border-white/10 bg-slate-950/60 p-4">
+      <h3 class="mb-2 text-sm font-semibold text-cyan-300">Planned Pipeline</h3>
+
+      <ol class="list-decimal space-y-1 pl-5 text-sm text-slate-400">
+        <li>Browser captures microphone audio.</li>
+        <li>Audio is sliced into 100 ms chunks.</li>
+        <li>Chunks stream over WebSocket.</li>
+        <li>FFmpeg normalizes audio to 16 kHz mono PCM.</li>
+        <li>Silero VAD detects speech segments.</li>
+        <li>Faster-Whisper transcribes segments.</li>
+        <li>Argos Translate translates locally.</li>
+        <li>Piper generates local voice playback.</li>
+      </ol>
+    </div>
+
+    <div class="rounded-xl border border-white/10 bg-slate-950/60 p-4">
+      <h3 class="mb-2 text-sm font-semibold text-cyan-300">Current Status</h3>
+
+      <ul class="space-y-1 text-sm text-slate-400">
+        <li>Phase 0: repository initialized.</li>
+        <li>Phase 1: Django + Channels + base UI scaffold.</li>
+        <li>Phase 2: live microphone WebSocket ingestion.</li>
+        <li>Phase 3: FFmpeg normalization.</li>
+        <li>Phase 4: VAD and long audio chunking.</li>
+        <li>Phase 5: Faster-Whisper transcription and LID.</li>
+        <li>Phase 6: translation.</li>
+        <li>Phase 7: TTS.</li>
+        <li>Phase 8: workspace and storage management.</li>
+        <li>Phase 9: upload pipeline.</li>
+        <li>Phase 10: PWA and production polish.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+{% endblock %}

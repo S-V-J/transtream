@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Settings | TranStream{% endblock %}
+
+{% block content %}
+<div class="grid gap-6 lg:grid-cols-2">
+  <section class="rounded-2xl border border-white/10 bg-slate-900/60 p-5 shadow-xl shadow-black/20">
+    <h2 class="mb-4 text-lg font-semibold">Storage Allocation Manager</h2>
+
+    <div class="space-y-4 text-sm text-slate-300">
+      <div>
+        <div class="mb-2 flex items-center justify-between">
+          <span>Used Space</span>
+          <span class="font-mono text-slate-400">0 GB / 0 GB</span>
+        </div>
+
+        <div class="h-3 w-full overflow-hidden rounded-full bg-slate-800">
+          <div class="h-full w-0 rounded-full bg-cyan-500"></div>
+        </div>
+      </div>
+
+      <div>
+        <label class="mb-2 block text-slate-400">
+          Default Root Directory
+        </label>
+
+        <input
+          type="text"
+          value="/home/ML/transtream/media"
+          class="w-full rounded-xl border border-white/10 bg-slate-950 px-3 py-2 font-mono text-slate-200 outline-none focus:border-cyan-500/60"
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="rounded-2xl border border-white/10 bg-slate-900/60 p-5 shadow-xl shadow-black/20">
+    <h2 class="mb-4 text-lg font-semibold">File Administration</h2>
+
+    <p class="text-sm leading-6 text-slate-400">
+      This panel will allow auditing, playing native media, playing generated
+      voice avatars, downloading, renaming, and permanently deleting recorded
+      assets.
+    </p>
+
+    <div class="mt-5 grid gap-2 sm:grid-cols-2">
+      <button class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600">
+        Audit Files
+      </button>
+
+      <button class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600">
+        Play Native Media
+      </button>
+
+      <button class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600">
+        Play Voice Avatar
+      </button>
+
+      <button class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600">
+        Download
+      </button>
+
+      <button class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-medium hover:bg-slate-600">
+        Rename
+      </button>
+
+      <button class="rounded-xl bg-rose-700 px-3 py-2 text-sm font-medium hover:bg-rose-600">
+        Delete
+      </button>
+    </div>
+  </section>
+</div>
+{% endblock %}

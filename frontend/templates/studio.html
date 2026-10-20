@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Studio | TranStream{% endblock %}
+
+{% block content %}
+<div x-data="{ recording: false, nativeScript: false }"
+     class="grid gap-6 lg:grid-cols-[320px_minmax(0,1fr)]">
+
+  <aside class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+    <h2 class="mb-4 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+      Workspaces
+    </h2>
+
+    <button
+      type="button"
+      class="mb-4 w-full rounded-xl border border-white/10 bg-slate-800/80 px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-slate-700"
+    >
+      📂 Open File System
+    </button>
+
+    <div class="space-y-2 text-sm text-slate-300">
+      <div class="flex items-center gap-2">
+        <span>▼</span>
+        <span>📂 Default_Project</span>
+      </div>
+
+      <div class="ml-6 space-y-1 text-slate-400">
+        <div>📄 Meeting_Notes</div>
+        <div>📄 Interview_01</div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <span>▶</span>
+        <span>📂 Archive</span>
+      </div>
+    </div>
+  </aside>
+
+  <section class="space-y-4">
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <span
+            class="inline-flex h-3 w-3 rounded-full"
+            :class="recording ? 'bg-red-500 animate-pulse' : 'bg-slate-600'"
+          ></span>
+
+          <span class="font-mono text-sm text-slate-200">
+            00:00:00.000
+          </span>
+
+          <span class="text-sm text-slate-400">
+            Language Detected: —
+          </span>
+        </div>
+
+        <button
+          type="button"
+          @click="nativeScript = !nativeScript"
+          class="animate-pulse rounded-full border border-cyan-400/40 bg-cyan-500/10 px-3 py-1 text-xs font-medium text-cyan-200 transition hover:bg-cyan-500/20"
+        >
+          ✨ View Native Script
+        </button>
+      </div>
+    </div>
+
+    <div
+      class="min-h-[360px] rounded-2xl border border-white/10 bg-slate-950/70 p-4 font-mono text-sm leading-7 text-slate-200 shadow-inner shadow-black/30"
+    >
+      <div class="mb-3 text-slate-500">
+        [00:00:00.000 -&gt; 00:00:00.000]
+      </div>
+
+      <p class="text-slate-300">
+        TranStream transcription canvas is ready.
+      </p>
+
+      <p class="mt-3 text-slate-500">
+        Phase 1 scaffold only. Live microphone ingestion, VAD, Faster-Whisper,
+        translation, and TTS will be connected in later phases.
+      </p>
+    </div>
+
+    <div class="flex flex-wrap gap-2">
+      <button
+        type="button"
+        @click="recording = true"
+        class="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500"
+      >
+        🎤 Start
+      </button>
+
+      <button
+        type="button"
+        @click="recording = false"
+        class="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-rose-500"
+      >
+        ⏹️ Stop
+      </button>
+
+      <button
+        type="button"
+        class="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-600"
+      >
+        💾 Save
+      </button>
+
+      <button
+        type="button"
+        class="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-600"
+      >
+        📤 Upload
+      </button>
+    </div>
+
+    <div class="rounded-2xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+      <label class="mb-3 block text-sm font-medium text-slate-400">
+        Target Language Translation
+      </label>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <select
+          class="min-w-[180px] rounded-xl border border-white/10 bg-slate-950 px-3 py-2 text-sm text-slate-200 outline-none focus:border-cyan-500/60"
+        >
+          <option>English</option>
+          <option>French</option>
+          <option>Spanish</option>
+          <option>German</option>
+          <option>Hindi</option>
+          <option>Arabic</option>
+          <option>Chinese</option>
+          <option>Japanese</option>
+        </select>
+
+        <button
+          type="button"
+          class="rounded-xl bg-indigo-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500"
+        >
+          🔀 Translate
+        </button>
+
+        <button
+          type="button"
+          class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600"
+        >
+          🔊 Play Audio
+        </button>
+
+        <button
+          type="button"
+          class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600"
+        >
+          🤖 Play Voice Avatar
+        </button>
+      </div>
+    </div>
+  </section>
+</div>
+{% endblock %}

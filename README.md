@@ -2,52 +2,101 @@
 
 TranStream is a local-first audio studio for real-time microphone transcription, uploaded audio transcription, language detection, translation, and text-to-speech playback.
 
-## Planned Capabilities
+## Core Vision
 
-- Live microphone ingestion over WebSocket using 100 ms audio chunks
+TranStream is designed to run entirely on the user's machine.
+
+The application should support:
+
+- Live microphone ingestion over WebSocket
+- 100 ms binary audio chunk streaming
 - Automatic language detection
-- English transcription by default with native-script toggle
-- Segment-level and word-level timestamps
-- Long audio / infinite stream processing using VAD-based chunking
+- English transcription by default
+- Native-script toggle for detected language
+- Segment-level timestamps
+- Word-level timestamps where supported
+- Long audio / infinite stream processing
+- VAD-based speech segmentation
 - FFmpeg normalization to 16 kHz, 16-bit, mono PCM
-- Faster-Whisper transcription engine
-- Argos Translate for offline translation
-- Piper TTS for local voice avatar playback
-- Upload support for common audio formats:
-  - `.mp3`
-  - `.wav`
-  - `.m4a`
-  - `.flac`
-  - `.ogg`
-  - `.aac`
-  - `.wma`
-- Workspace file manager with folders and transcription files
-- Settings page with storage usage and file administration
-- PWA installation support for desktop and mobile
+- Faster-Whisper transcription
+- Argos Translate offline translation
+- Piper TTS local voice playback
+- Upload support for common audio formats
+- Workspace file manager
+- Settings page with storage administration
+- PWA installation support
+
+## Supported Audio Inputs
+
+Planned supported upload formats:
+
+- `.mp3`
+- `.wav`
+- `.m4a`
+- `.flac`
+- `.ogg`
+- `.aac`
+- `.wma`
+
+## Naming Convention
+
+Recording filename format:
+
+```text
+TS_REC_[ISO_LANG]_[YYYYMMDD_HHMMSS].[ext]
+```
+
+Example:
+
+```text
+TS_REC_SPA_20261020_154522.wav
+```
 
 ## Tech Stack
 
-- Backend: Django 5.1 + Django Channels
-- ASGI Server: Daphne
-- Realtime Broker: Redis
-- Speech-to-Text: Faster-Whisper
-- Voice Activity Detection: Silero VAD
-- Audio Processing: FFmpeg + Pydub
-- Translation: Argos Translate
-- Text-to-Speech: Piper
-- Frontend: HTMX + Alpine.js + Tailwind CSS
-- Delivery: Progressive Web App
+Backend:
+
+- Django
+- Django Channels
+- Daphne ASGI server
+- Redis channel layer
+
+Audio / AI:
+
+- Faster-Whisper
+- Silero VAD
+- FFmpeg
+- Pydub
+
+Translation:
+
+- Argos Translate
+
+Text-to-Speech:
+
+- Piper
+
+Frontend:
+
+- HTMX
+- Alpine.js
+- Tailwind CSS
+- Progressive Web App
 
 ## Repository
 
-GitHub: https://github.com/S-V-J/transtream
+GitHub:
 
-## Development Status
+```text
+https://github.com/S-V-J/transtream
+```
 
-Phase 0: repository initialized.
+SSH:
 
-Claude Code will implement the application according to `prd.md`.
+```text
+git@github.com:S-V-J/transtream.git
+```
 
-## License
+## Development Model
 
-This project is licensed under the MIT License. See the LICENSE file for details.
+This project is being developed manually through guided full-stack engineering steps.

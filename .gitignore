@@ -58,11 +58,11 @@ desktop.ini
 .vscode/
 !.vscode/extensions.json
 
-# Claude Code local memory / private history
-.claude/memory.json
-.claude/memory.archive.json
-.claude/chat-history.json
-.claude/session-cache/
+# Local caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Audio assets generated during development
 *.wav
@@ -73,9 +73,10 @@ desktop.ini
 *.aac
 *.wma
 
-# Keep source code and docs tracked
-!README.md
-!LICENSE
-!.gitignore
-!prd.md
-!CLAUDE.md
+# Claude Code local files (kept on disk, never pushed)
+.claude/
+.claudeignore
+
+# TranStream runtime artifacts
+logs/
+*.pid

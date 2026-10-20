@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}My Account | TranStream{% endblock %}
+
+{% block content %}
+<section class="rounded-2xl border border-white/10 bg-slate-900/60 p-5 shadow-xl shadow-black/20">
+  <h2 class="mb-4 text-lg font-semibold">My Account</h2>
+
+  {% if user.is_authenticated %}
+    <p class="text-sm text-slate-300">
+      Signed in as:
+      <span class="font-mono text-cyan-300">{{ user.username }}</span>
+    </p>
+
+    <p class="mt-3 text-sm text-slate-400">
+      Email:
+      <span class="font-mono">{{ user.email|default:"not set" }}</span>
+    </p>
+  {% else %}
+    <p class="text-sm text-slate-400">
+      You are not signed in. Use the Django admin at
+      <span class="font-mono text-slate-200">/admin/</span>
+      to create or manage accounts.
+    </p>
+  {% endif %}
+
+  <div class="mt-6 flex flex-wrap gap-2">
+    <a
+      href="/admin/"
+      class="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500"
+    >
+      Open Admin
+    </a>
+
+    <a
+      href="{% url 'studio:studio' %}"
+      class="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-600"
+    >
+      Back to Studio
+    </a>
+  </div>
+</section>
+{% endblock %}
