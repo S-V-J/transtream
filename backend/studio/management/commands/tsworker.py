@@ -30,6 +30,7 @@ Flags:
 """
 
 import logging
+import os
 import sys
 
 from django.core.management.base import BaseCommand
@@ -57,6 +58,11 @@ class Command(BaseCommand):
                             help="Set studio logger level to DEBUG.")
 
     def handle(self, *args, **options):
+        # Optional reproducibility pin: must run BEFORE ctranslate2 is imported
+        # (i.e. before `from studio.worker import WorkerLoop` below).
+        if os.getenv("WHISPER_DETERMINISTIC", "0").lower() in {"1", "true", "yes", "on"}:
+            os.environ["OMP_NUM_THREADS"] = "1"
+            os.environ.setdefault("CT2_VERBOSE", "0")
         # The worker configures ITS OWN logging (settings.py has no LOGGING
         # dict, so Django's implicit default is WARNING+ to stderr). This does
         # NOT touch Daphne's process. INFO+ so pipeline/recovery progress shows.

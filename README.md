@@ -204,6 +204,7 @@ curl -X POST http://127.0.0.1:8003/api/v1/transcriptions \
 - **VAD segment count ≠ transcript segment count.** Silero segments the *acoustic* signal; Whisper segments the *linguistic* stream over the whole take and merges across short silences. Both timelines are intentional and will be aligned for word-level timestamps.
 - **Language ID can flip on very short live-preview clips** (< ~15 s) with the `tiny` model. The authoritative post-stop pass over the full take is stable; raise `WHISPER_MODEL_SIZE` to `base` or pass an explicit `language` to lock it.
 - **First run downloads the model** from the Hugging Face Hub (~75 MB for `tiny`). Set `HF_TOKEN` in `.env` to avoid anonymous rate limits.
+- **Re-runs may yield a slightly different segment count.** Faster-Whisper (CTranslate2 int8) and its internal Silero-VAD (ONNX) are not bit-reproducible across runs on CPU: thread scheduling changes float reduction order, which can flip a segment boundary. A retry therefore converges to a *structurally identical* transcript (contiguous indices, no duplicates, same language, job DONE) but not necessarily a byte-identical one. Set `WHISPER_DETERMINISTIC=1` to pin single-threaded inference for fully reproducible re-runs at a small speed cost.
 
 ## Contributing
 
