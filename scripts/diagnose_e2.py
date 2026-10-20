@@ -1,33 +1,52 @@
 """
-Phase 6b E2 root-cause diagnostic.
+Phase 6b E2 diagnostic v2 — rewritten for the unified pipeline (def9e34+).
 
-Partitions the "re-run yields a different Whisper segment count" finding into
-three INDEPENDENT hypotheses (a failure of one does not excuse the others):
+WHY v2 EXISTS:
+  v1 imported studio.pipeline._run_ffmpeg_sync, a PRIVATE helper that the
+  6b-fix deleted when stage-1 normalization was unified through
+  audio_service.normalize_audio via the asyncio.run bridge. Re-running v1
+  after the rewrite raised ImportError. Lesson encoded here: diagnostics
+  must target the architecture that exists; when an implementation is
+  replaced, its tools are updated in the same change.
 
-  H1  FFmpeg run-variance   : T1  worker-normalize the same webm TWICE, hash both WAVs.
-                              Unequal => ffmpeg itself is non-deterministic (anomalous).
-  H2  Front-door arg drift  : T3  hash worker-WAV vs browser-WAV (audio_service) for the
-                              SAME webm. Unequal => pipeline.py's reconstructed FFmpeg
-                              args drifted from the proven async path => the two front
-                              doors transcribe different audio. (Explains the observed
-                              browser=8 vs worker=9 on take 172818.)
-  H3  ML run-variance       : T2  transcribe ONE identical WAV TWICE via transcribe_audio.
-                              Unequal counts/text => CTranslate2-int8 / internal
-                              Silero-VAD-ONNX are not bit-reproducible on this CPU
-                              (OpenMP reduction order). E2's worker-vs-worker failure
-                              reduces to H1 or H3; H2 cannot explain E2 but must be
-                              fixed regardless because it breaks pipeline parity.
+ARCHITECTURE AFTER 6b-fix — THERE IS ONE FRONT DOOR:
+  The worker delegates stage 1 to the SAME async normalizer the WebSocket
+  consumer uses. Consequently:
+    * old T1 (worker-ffmpeg determinism) and old T3 (worker-vs-browser
+      parity) COLLAPSE into T1': run the shared bridge TWICE on one webm;
+      hashes must be equal. Equality now proves both ffmpeg determinism
+      and the impossibility of front-door drift (nothing left to drift).
+    * old T4 (browser-WAV transcription) is deleted: same bytes as T1'.
+    * T2 (unpinned ML run-variance) is unchanged: the standing H3 monitor.
+    * T2p (NEW): T2 re-run inside a SUBPROCESS with OMP_NUM_THREADS=1 set
+      before the interpreter starts. In-process pinning is impossible once
+      ctranslate2 is imported (it reads the env at library init), so the
+      subprocess is the only repeatable proof of the WHISPER_DETERMINISTIC
+      knob shipped in tsworker.py.
 
-  T4  (informational) transcribe the browser-WAV once; its count vs the worker-WAV's
-      count quantifies H2's practical impact on transcripts.
+VERDICT POLICY (matches the system contract, do not misread):
+  The product promises STRUCTURAL convergence on re-run (E-v2) and PIN
+  EFFECTIVENESS (T2p). It does NOT promise unpinned bit-reproducibility.
+  Therefore the exit code gates on:
+      H1_bridge_determinism  must be green   (RED => ffmpeg/IO anomaly)
+      H3p_pin_effective      must be green   (NOT True => knob broken/inconclusive)
+  and treats:
+      H3_ml_run_variance     REPORTED, non-fatal (RED = documented CPU variance;
+                                                  structural E-v2 covers it)
+  A shift between T2's count and T2p's count is INFORMATIONAL and EXPECTED:
+  thread count changes float reduction order, which can flip a segment
+  boundary. That shift IS the README "Known behavior" mechanism, observed.
 
-Inputs are read-only; all outputs go to /tmp/ts_diag. Never touches
+Safety: inputs read-only; all outputs under /tmp/ts_diag; never touches
 media/recordings/, never creates Take/Job rows, never opens a socket.
 
-Run:  cd /home/ML/transtream && python scripts/diagnose_e2.py
+Run:   cd /home/ML/transtream && python scripts/diagnose_e2.py
+Exit:  0 green / 1 a gated red or inconclusive pin / 2 prereq missing.
+Cost:  ~30-45 s (two cold model loads: parent T2 + child T2p).
 """
 import hashlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -37,18 +56,47 @@ BACKEND = REPO / "backend"
 sys.path.insert(0, str(BACKEND))
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "transtream.settings")
 
-import asyncio  # noqa: E402  (import after path setup, before django.apps)
-import django   # noqa: E402
+import django  # noqa: E402
 
 django.setup()
 
-from django.conf import settings             # noqa: E402
-from studio.audio_service import (           # noqa: E402
-    AudioNormalizationError,
-    normalize_audio,
+from django.conf import settings  # noqa: E402
+from studio.pipeline import (  # noqa: E402
+    PipelineError,
+    _normalize_via_audio_service,
 )
-from studio.pipeline import PipelineError, _run_ffmpeg_sync  # noqa: E402
-from studio.transcription_service import transcribe_audio    # noqa: E402
+from studio.transcription_service import transcribe_audio  # noqa: E402
+
+# Child script for the pinned re-run. Built with .replace("{BACKEND}", ...)
+# and %-formatting internally: NO f-strings, NO brace tokens other than the
+# single {BACKEND} placeholder. This is deliberate — nested heredoc/quoting
+# accidents have bitten this project twice; a plain template cannot.
+CHILD_SRC = '''"""Pinned re-run child, spawned by diagnose_e2 v2. Fresh interpreter
+so OMP_NUM_THREADS is honored before ctranslate2 initializes."""
+import os
+import sys
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ.setdefault("CT2_VERBOSE", "0")
+sys.path.insert(0, "{BACKEND}")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "transtream.settings")
+
+import django
+
+django.setup()
+
+from pathlib import Path
+
+from studio.transcription_service import transcribe_audio
+
+wav = Path(sys.argv[1])
+a = transcribe_audio(wav, beam_size=5)
+b = transcribe_audio(wav, beam_size=5)
+ta = " | ".join(s["text"] for s in a["segments"])
+tb = " | ".join(s["text"] for s in b["segments"])
+same = (len(a["segments"]) == len(b["segments"])) and (ta == tb)
+print("PINNED_RESULT %d %d %s" % (len(a["segments"]), len(b["segments"]), same))
+'''
 
 
 def sha256(p: Path) -> str:
@@ -63,98 +111,129 @@ def main() -> int:
         reverse=True,
     )
     if not webms:
-        print("PREREQ MISSING: no TS_REC_RAW_*.webm — record one browser take first.")
+        print("PREREQ MISSING: no TS_REC_RAW_*.webm - record one browser take first.")
         return 2
 
     W = webms[0]
-    print(f"input webm : {W.name} ({W.stat().st_size} bytes) sha256={sha256(W)[:16]}…")
+    print(f"input webm : {W.name} ({W.stat().st_size} bytes) sha256={sha256(W)[:16]}...")
 
     tmp = Path("/tmp/ts_diag")
     tmp.mkdir(exist_ok=True)
-    w1, w2, wb = tmp / "worker_1.wav", tmp / "worker_2.wav", tmp / "browser.wav"
-    for p in (w1, w2, wb):
+    p1, p2 = tmp / "bridge_1.wav", tmp / "bridge_2.wav"
+    for p in (p1, p2):
         p.unlink(missing_ok=True)
 
-    flags = {}
+    flags: dict[str, bool | None] = {}
 
-    # ── T1: FFmpeg run-variance (H1) ──────────────────────────────────────
-    print("\n[T1] worker FFmpeg determinism (same webm, twice)")
+    # -- T1': shared-bridge determinism (covers old T1 + old T3) -------------
+    print("\n[T1'] unified bridge, same webm, twice -> hashes must match")
     try:
-        _run_ffmpeg_sync(W, w1)
-        _run_ffmpeg_sync(W, w2)
-        h1, h2 = sha256(w1), sha256(w2)
-        flags["H1_ffmpeg_run_variance"] = (h1 != h2)
-        print(f"     run1={h1[:16]}…  run2={h2[:16]}…  identical={h1 == h2}")
-    except (PipelineError, Exception) as exc:
-        flags["H1_ffmpeg_run_variance"] = None
-        print(f"     ERROR: {exc}")
+        _normalize_via_audio_service(W, p1)
+        _normalize_via_audio_service(W, p2)
+        h1, h2 = sha256(p1), sha256(p2)
+        flags["H1_bridge_determinism"] = (h1 != h2)  # True == variance == RED
+        print(f"     run1={h1[:16]}... ({p1.stat().st_size} B)")
+        print(f"     run2={h2[:16]}... ({p2.stat().st_size} B)")
+        print(f"     identical={h1 == h2}"
+              f"   (single front door: equality proves determinism AND no drift)")
+    except PipelineError as exc:
+        print(f"     ERROR (bridge): {exc}")
+        return 1
+    except Exception as exc:
+        print(f"     ERROR (unexpected): {exc}")
         return 1
 
-    # ── T3: front-door parity (H2) ────────────────────────────────────────
-    print("\n[T3] browser path (audio_service.normalize_audio) vs worker path, same webm")
-    try:
-        asyncio.run(normalize_audio(W, wb))
-        hb = sha256(wb)
-        flags["H2_front_door_arg_drift"] = (hb != h1)
-        print(f"     browser={hb[:16]}… ({wb.stat().st_size} B)")
-        print(f"     worker ={h1[:16]}… ({w1.stat().st_size} B)")
-        print(f"     identical={hb == h1}   <-- False means the two front doors"
-              f" transcribe DIFFERENT audio")
-    except (AudioNormalizationError, Exception) as exc:
-        flags["H2_front_door_arg_drift"] = None
-        print(f"     ERROR: {exc}")
-        return 1
-
-    # ── T2: ML run-variance (H3) ──────────────────────────────────────────
-    print("\n[T2] transcribe_audio on the SAME worker WAV, twice (cold+warm model)")
-    ra = transcribe_audio(w1, beam_size=5)
-    rb = transcribe_audio(w1, beam_size=5)
+    # -- T2: unpinned ML run-variance (standing H3 monitor, non-fatal) -------
+    print("\n[T2] transcribe_audio on the bridge WAV, twice (cold+warm model)")
+    ra = transcribe_audio(p1, beam_size=5)
+    rb = transcribe_audio(p1, beam_size=5)
     ta = " | ".join(s["text"] for s in ra["segments"])
     tb = " | ".join(s["text"] for s in rb["segments"])
-    same = (len(ra["segments"]) == len(rb["segments"])) and (ta == tb)
-    flags["H3_ml_run_variance"] = (not same)
+    unpinned_same = (len(ra["segments"]) == len(rb["segments"])) and (ta == tb)
+    flags["H3_ml_run_variance"] = (not unpinned_same)
     print(f"     run1: {len(ra['segments'])} seg  lang={ra['language']} "
           f"({ra['language_probability']:.2f})")
     print(f"     run2: {len(rb['segments'])} seg  lang={rb['language']} "
           f"({rb['language_probability']:.2f})")
-    print(f"     identical={same}")
-    if not same:
-        print(f"     text1: {ta[:120]}")
-        print(f"     text2: {tb[:120]}")
+    print(f"     identical={unpinned_same}   (RED here = documented variance, "
+          f"non-fatal by policy)")
 
-    # ── T4: H2 practical impact ───────────────────────────────────────────
-    print("\n[T4] whisper on the BROWSER WAV (parity impact, informational)")
-    rc = transcribe_audio(wb, beam_size=5)
-    print(f"     browser-WAV -> {len(rc['segments'])} seg "
-          f"(worker-WAV was {len(ra['segments'])})")
+    # -- T2p: pinned subprocess proof (GATED: the knob must work) ------------
+    print("\n[T2p] pinned child subprocess (OMP_NUM_THREADS=1 before import)")
+    child = tmp / "child_pinned.py"
+    child.write_text(CHILD_SRC.replace("{BACKEND}", str(BACKEND)))
+    child_env = {**os.environ, "OMP_NUM_THREADS": "1"}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(child), str(p1)],
+            capture_output=True, text=True, timeout=600, env=child_env,
+        )
+    except subprocess.TimeoutExpired:
+        flags["H3p_pin_effective"] = None
+        print("     INCONCLUSIVE: child timed out after 600 s (resource governor?)")
+        print("     Fallback evidence: the 2026-10-20 21:13 in-process pin proof "
+              "(identical=True) stands on record.")
+        proc = None
 
-    # ── verdict matrix: INDEPENDENT flags, not an elif chain ──────────────
+    pinned_counts: tuple[int, int] | None = None
+    pinned_same: bool | None = None
+    if proc is not None:
+        if proc.returncode != 0:
+            flags["H3p_pin_effective"] = None
+            tail = (proc.stderr or "").strip().splitlines()[-8:]
+            print("     INCONCLUSIVE: child exited "
+                  f"{proc.returncode}; stderr tail:")
+            for line in tail:
+                print(f"       {line}")
+        else:
+            for line in reversed(proc.stdout.splitlines()):
+                if line.startswith("PINNED_RESULT"):
+                    _, c1, c2, same_s = line.split()
+                    pinned_counts = (int(c1), int(c2))
+                    pinned_same = (same_s == "True")
+                    break
+            if pinned_same is None:
+                flags["H3p_pin_effective"] = None
+                print("     INCONCLUSIVE: no PINNED_RESULT line in child stdout")
+            else:
+                flags["H3p_pin_effective"] = (not pinned_same)  # True == broken
+                print(f"     pinned run1={pinned_counts[0]} seg  "
+                      f"run2={pinned_counts[1]} seg  identical={pinned_same}")
+                shift = (pinned_counts[0] != len(ra["segments"])
+                         or pinned_counts[1] != len(rb["segments"]))
+                if shift:
+                    print(f"     count shift vs unpinned "
+                          f"({len(ra['segments'])} -> {pinned_counts[0]}): "
+                          f"EXPECTED and INFORMATIVE - thread count changes float "
+                          f"reduction order, flipping boundaries. This is the "
+                          f"README mechanism, observed live.")
+
+    # -- verdict: independent flags, gated policy ----------------------------
     print("\n" + "=" * 66)
-    print("VERDICT (each hypothesis evaluated independently):")
-    v = flags
-    print(f"  H1 ffmpeg run-variance     : {'RED' if v['H1_ffmpeg_run_variance'] else 'green'}")
-    print(f"  H2 front-door arg drift    : {'RED' if v['H2_front_door_arg_drift'] else 'green'}")
-    print(f"  H3 ML run-variance         : {'RED' if v['H3_ml_run_variance'] else 'green'}")
+    print("VERDICT (gated: H1 + H3p; H3 reported, non-fatal):")
+    h1_red = flags.get("H1_bridge_determinism") is True
+    h3_red = flags.get("H3_ml_run_variance") is True
+    h3p = flags.get("H3p_pin_effective")
+    print(f"  H1  bridge determinism      : {'RED' if h1_red else 'green'}")
+    print(f"  H3  unpinned ML variance    : {'RED (documented, non-fatal)' if h3_red else 'green'}")
+    print(f"  H3p pin effective           : "
+          f"{'green' if h3p is False else ('RED (broken)' if h3p is True else 'INCONCLUSIVE')}")
     print()
-    if v["H2_front_door_arg_drift"]:
-        print("  -> H2 RED: apply the pipeline.py asyncio.run unification (Step 2).")
-        print("     It makes browser/worker byte-identical BY CONSTRUCTION and needs")
-        print("     NO edit of audio_service.py (schema lock never triggers).")
-    else:
-        print("  -> H2 green: args already match; the unification is still applied")
-        print("     as permanent hygiene against future drift.")
-    if v["H3_ml_run_variance"]:
-        print("  -> H3 RED: CPU int8/ONNX re-runs are not bit-reproducible. Adopt the")
-        print("     structural E-v2 assertion (Step 4) + README known-behavior bullet")
-        print("     (Step 5). Optional: WHISPER_DETERMINISTIC=1, then RE-RUN T2 under")
-        print("     the pin to prove it collapses to identical=True.")
-    else:
-        print("  -> H3 green: ML reproduced here; E2's failure was H1/H2-driven or")
-        print("     environmental. Re-run the harness; if E-v2 still flakes, dig deeper.")
-    if v["H1_ffmpeg_run_variance"]:
-        print("  -> H1 RED (unexpected): ffmpeg itself varies. Report ffmpeg version")
-        print("     and pin -y/resampler flags; escalate before any other step.")
-    return 0
+    if h1_red:
+        print("  -> H1 RED: the shared bridge is non-deterministic on this input.")
+        print("     Escalate: ffmpeg version, disk/IO health, audio_service args.")
+    if h3p is True:
+        print("  -> H3p RED: WHISPER_DETERMINISTIC does NOT collapse variance.")
+        print("     The knob is a lie; remove the README sentence + tsworker pin")
+        print("     or debug env propagation (OMP must precede ctranslate2 init).")
+    if h3p is None:
+        print("  -> H3p INCONCLUSIVE: rerun when memory is calm, or accept the")
+        print("     21:13 in-process proof as the recorded evidence.")
+    if not h1_red and h3p is False:
+        print("  -> ALL GATED CHECKS GREEN. Diagnostic v2 matches the architecture.")
+
+    gated_fail = h1_red or (h3p is not False)
+    return 1 if gated_fail else 0
 
 
 if __name__ == "__main__":
