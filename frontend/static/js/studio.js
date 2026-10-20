@@ -7,18 +7,15 @@ document.addEventListener('alpine:init', () => {
     sessionId: '',
     nativeScript: false,
 
-    // Phase 3: normalization
     normalizing: false,
     normalized: null,
     normalizeMessage: '',
 
-    // Phase 4: VAD
     vadRunning: false,
     vadSegments: [],
     vadTotalSpeechMs: 0,
     vadMessage: '',
 
-    // Phase 5: transcription
     transcribing: false,
     transcribeMessage: '',
     languageDetected: '',
@@ -158,13 +155,28 @@ document.addEventListener('alpine:init', () => {
         case 'normalized': this.normalizing = false; this.normalized = msg; this.normalizeMessage = ''; break;
         case 'vad_started': this.vadRunning = true; this.vadSegments = []; this.vadTotalSpeechMs = 0; this.vadMessage = msg.message || 'Detecting speech segments…'; break;
         case 'vad_complete': this.vadRunning = false; this.vadSegments = msg.segments || []; this.vadTotalSpeechMs = msg.total_speech_ms || 0; this.vadMessage = ''; break;
-        case 'transcribing_started': this.transcribing = true; this.transcriptSegments = []; this.languageDetected = ''; this.transcribeMessage = msg.message || 'Transcribing…'; break;
+        
+        // REAL-TIME TRANSCRIPTION PROGRESS
+        case 'transcribing_progress':
+          this.transcriptSegments.push(msg.segment);
+          this.languageDetected = '...'; 
+          break;
+          
+        case 'transcribing_started': 
+          this.transcribing = true; 
+          this.transcriptSegments = []; 
+          this.languageDetected = ''; 
+          this.transcribeMessage = msg.message || 'Transcribing…'; 
+          break;
         case 'transcribing_complete':
           this.transcribing = false;
           this.languageDetected = msg.language ? msg.language.toUpperCase() : 'UNKNOWN';
-          this.transcriptSegments = msg.segments || [];
+          if (msg.segments && msg.segments.length > 0) {
+            this.transcriptSegments = msg.segments;
+          }
           this.transcribeMessage = '';
           break;
+          
         case 'error':
           if (msg.saved) this.saved = msg.saved;
           if (msg.stage === 'normalization') { this.normalizing = false; this.normalizeMessage = ''; }

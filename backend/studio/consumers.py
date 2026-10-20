@@ -1,8 +1,11 @@
 import json
 import logging
 import os
+import queue
 import tempfile
+import threading
 import time
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,7 +19,7 @@ from studio.audio_service import (
     normalized_output_path,
 )
 from studio.vad_service import VADError, extract_speech_segments
-from studio.transcription_service import TranscriptionError, transcribe_audio
+from studio.transcription_service import transcribe_audio_progressive
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +34,12 @@ MIME_EXTENSIONS = {
     "audio/aac": ".aac",
 }
 
-
 def extension_for_mime(mime):
     mime = (mime or "").lower()
     for prefix, ext in MIME_EXTENSIONS.items():
         if mime.startswith(prefix):
             return ext
     return ".bin"
-
 
 def unique_recording_path(directory, prefix, ext):
     directory = Path(directory)
@@ -49,7 +50,6 @@ def unique_recording_path(directory, prefix, ext):
         candidate = directory / f"{prefix}_{stamp}_{counter}{ext}"
         counter += 1
     return candidate
-
 
 class SessionWriter:
     def __init__(self, directory, prefix, mime):
@@ -136,7 +136,6 @@ class SessionWriter:
             "duration_ms": self.current_duration_ms(),
             "mime": self.mime,
         }
-
 
 class AudioConsumer(AsyncWebsocketConsumer):
     async def connect(self):
@@ -245,7 +244,7 @@ class AudioConsumer(AsyncWebsocketConsumer):
         # Stage 2: Silero VAD segmentation
         await self._trigger_vad(output_path)
 
-        # Stage 3: Faster-Whisper Transcription
+        # Stage 3: Faster-Whisper Transcription (Real-time progressive)
         await self._trigger_transcription(output_path)
 
     async def _trigger_vad(self, wav_path: Path):
@@ -277,21 +276,54 @@ class AudioConsumer(AsyncWebsocketConsumer):
             "input_file": wav_path.name,
             "message": "Transcribing with Faster-Whisper…",
         })
-        try:
-            result = await sync_to_async(transcribe_audio, thread_sensitive=True)(wav_path)
-            await self._safe_send({
-                "type": "transcribing_complete",
-                "input_file": wav_path.name,
-                "language": result["language"],
-                "language_probability": result["language_probability"],
-                "segments": result["segments"],
-            })
-        except TranscriptionError as exc:
-            logger.warning("Transcription failed for %s: %s", wav_path.name, exc)
-            await self._safe_send({"type": "error", "message": f"Transcription failed: {exc}", "stage": "transcription", "normalized_saved": True, "normalized_file": wav_path.name})
-        except Exception as exc:
-            logger.exception("Unexpected transcription error for %s", wav_path.name)
-            await self._safe_send({"type": "error", "message": f"Transcription error: {exc}", "stage": "transcription", "normalized_saved": True, "normalized_file": wav_path.name})
+        
+        q = queue.Queue()
+        
+        # Start background thread for real-time progressive generation
+        threading.Thread(
+            target=transcribe_audio_progressive, 
+            args=(wav_path, q), 
+            daemon=True
+        ).start()
+        
+        all_segments = []
+        language = "unknown"
+        language_prob = 0.0
+        
+        while True:
+            # Wait for item from the thread-safe queue without blocking the async event loop
+            item = await asyncio.to_thread(q.get)
+            
+            if "error" in item:
+                logger.warning("Transcription failed for %s: %s", wav_path.name, item["error"])
+                await self._safe_send({
+                    "type": "error",
+                    "message": f"Transcription failed: {item['error']}",
+                    "stage": "transcription",
+                    "normalized_saved": True,
+                    "normalized_file": wav_path.name,
+                })
+                return
+                
+            if item["type"] == "segment":
+                all_segments.append(item)
+                # REAL-TIME: Send segment to frontend the moment it's generated
+                await self._safe_send({
+                    "type": "transcribing_progress",
+                    "segment": item,
+                })
+            elif item["type"] == "complete":
+                language = item["language"]
+                language_prob = item["language_probability"]
+                break
+                
+        await self._safe_send({
+            "type": "transcribing_complete",
+            "input_file": wav_path.name,
+            "language": language,
+            "language_probability": language_prob,
+            "segments": all_segments,
+        })
 
     async def receive_audio(self, data):
         if self.writer is None or self.writer.closed:
