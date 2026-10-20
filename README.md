@@ -190,9 +190,9 @@ curl -X POST http://127.0.0.1:8003/api/v1/transcriptions \
 | Silero VAD segmentation | ✅ Working |
 | Faster-Whisper transcription + language ID | ✅ Working |
 | Real-time rolling preview | ✅ Working |
-| Persistence (takes / segments / jobs) | 🚧 In progress |
-| Retry / recovery / concurrency control | 🚧 In progress |
-| File upload transcription | 🚧 In progress |
+| Persistence (takes / segments / jobs) | ✅ Working |
+| Retry / recovery / concurrency control | ✅ Working |
+| File upload transcription | 🚧 In progress (Phase 7) |
 | Argos Translate (offline NMT) | ⏳ Planned |
 | Piper TTS + voice avatars | ⏳ Planned |
 | Public API + per-user keys | ⏳ Planned |
