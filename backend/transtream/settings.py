@@ -120,10 +120,7 @@ MEDIA_ROOT = REPO_ROOT / "media"
 # ─── TranStream Studio Storage ─────────────────────────────────────────────
 RECORDINGS_DIR = MEDIA_ROOT / "recordings"
 
-# Maximum raw audio accepted for one take before backend force-saves and stops.
 STUDIO_MAX_TAKE_BYTES = 512 * 1024 * 1024
-
-# Send live stats to browser every N received binary chunks.
 STUDIO_STATS_EVERY_CHUNKS = 20
 
 # ─── FFmpeg / Audio Normalization (Phase 3) ────────────────────────────────
@@ -131,6 +128,18 @@ FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "300"))
 AUDIO_SAMPLE_RATE = int(os.getenv("AUDIO_SAMPLE_RATE", "16000"))
 AUDIO_CHANNELS = int(os.getenv("AUDIO_CHANNELS", "1"))
+
+# ─── Silero VAD Speech Segmentation (Phase 4) ─────────────────────────────
+# Probability threshold: higher = stricter (less silence classified as speech).
+VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.5"))
+
+# Minimum silence duration (ms) to split two speech regions into
+# separate segments.  Larger values merge nearby speech.
+VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
+
+# Padding (ms) added before/after each detected speech region
+# to avoid clipping the first/last phoneme.
+VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "30"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
