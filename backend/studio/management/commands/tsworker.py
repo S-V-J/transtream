@@ -30,9 +30,12 @@ Flags:
 """
 
 import logging
+import logging.handlers
 import os
 import sys
+from pathlib import Path
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 
 
@@ -74,6 +77,39 @@ class Command(BaseCommand):
         )
         for noisy in ("django.db.backends", "urllib3", "asyncio", "hpack", "h2"):
             logging.getLogger(noisy).setLevel(logging.WARNING)
+
+        # ─── Persistent worker log ──────────────────────────────────────────
+        # WHY THIS EXISTS AND WHY IT IS HERE RATHER THAN IN settings.py.
+        # The evidence for the durable path - "persisted 11 VAD segment(s)",
+        # "stage 1 backfilled duration_ms=122041", the recovery sweep counts,
+        # the warmup timings - lived only in a terminal that closes. Losing it
+        # meant losing the only record that Q2/Q3 ever worked.
+        #
+        # A LOGGING DICT IN settings.py WAS THE OBVIOUS FIX AND IT IS WRONG:
+        # this command configures logging with basicConfig(), which does
+        # NOTHING if the root logger already has handlers. Django applies
+        # settings.LOGGING at setup() time, i.e. before handle() runs, so a
+        # dict that installed a root handler would silently disable the
+        # --verbose level and the format string above. The fix would have
+        # broken the switch that motivated it, invisibly. Attaching the handler
+        # here, AFTER basicConfig, has no such interaction, and it keeps the
+        # worker's log configuration in the one process that owns it.
+        #
+        # logs/ is gitignored by the same rule that keeps daphne.log out of the
+        # repository, so nothing recorded here can be committed by accident.
+        # Rotation bounds the disk cost: 5 MB x 3 backups = 15 MB ceiling,
+        # which is generous for text and small next to one 122 s WAV.
+        log_path = Path(settings.REPO_ROOT) / "logs" / "worker.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+        )
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        ))
+        root = logging.getLogger()
+        root.addHandler(fh)
+        logger.info("worker log -> %s (rotating, 5 MB x 3)", log_path)
 
         from studio.worker import WorkerLoop
 
