@@ -8,6 +8,30 @@ REPO_ROOT = BASE_DIR.parent
 
 load_dotenv(REPO_ROOT / ".env")
 
+# ─── Hugging Face Hub offline bridge ────────────────────────────────────────
+# huggingface_hub evaluates HF_HUB_OFFLINE at ITS OWN import time, so this has to
+# run before anything imports it. Today it does: settings.py is the first module
+# Django loads, and both audio services import their models lazily on first use,
+# long after this line. That ordering is a property of the codebase rather than a
+# guarantee, so it is written down - if a future edit ever lifts a model import to
+# module scope, this bridge stops working silently instead of failing loudly,
+# which is the worst possible shape for a failure here.
+#
+# DEFAULT OFF, AND IT MUST STAY OFF BY DEFAULT. With HF_HUB_OFFLINE=1 the Hub
+# client refuses network access, so a fresh clone with no cache FAILS instead of
+# downloading the ~75 MB `tiny` weights that the README documents as the expected
+# first run. Set HF_OFFLINE=1 only after one successful run has populated the
+# cache. What it buys is the 0.5-1.1 s revision round trip visible in every cold
+# Whisper load.
+#
+# PROVENANCE: this line was documented in README:380 before it existed here. The
+# README edit and this settings edit were drafted together and only one of them
+# ran, which re-created the exact KNOWN GAP that commit 0926812 closed - the
+# documented-knob-never-read failure, manufactured a second time by the same
+# project in the same week.
+if os.getenv("HF_OFFLINE", "").strip().lower() in {"1", "true", "yes", "on"}:
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-dev-only-change-me")
 
 DEBUG = os.getenv("DJANGO_DEBUG", "1").lower() in {"1", "true", "yes", "on"}

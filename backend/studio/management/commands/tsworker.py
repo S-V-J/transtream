@@ -38,6 +38,21 @@ from pathlib import Path
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
+# Module-level logger. THIS LINE WAS MISSING and it took the worker down on
+# every start - plain and warmed alike, exit 1 - from commit 28ffb2c until now.
+# The persistent-log block in handle() ends with logger.info("worker log -> ...")
+# and this file never bound the name: it imports logging, logging.handlers, Path
+# and settings, and calls logging.getLogger(noisy) and logging.getLogger() (root),
+# but nothing assigns `logger`. NameError is a RUNTIME fact, so py_compile passed,
+# manage.py check passed, and G1-G4 passed. The only gate that sees it is running
+# the command, which is why scripts/guard_worker_boots.py now exists.
+#
+# Named per the convention every other module in studio/ already follows
+# (consumers.py, warmup.py, worker.py, persistence.py all bind
+# getLogger(__name__)), so the worker's lines carry the command's dotted path
+# instead of arriving unnamed on the root logger.
+logger = logging.getLogger(__name__)
+
 
 class Command(BaseCommand):
     help = "Run the TranStream durable job worker (poll -> lease -> process -> repeat)."
@@ -110,6 +125,27 @@ class Command(BaseCommand):
         root = logging.getLogger()
         root.addHandler(fh)
         logger.info("worker log -> %s (rotating, 5 MB x 3)", log_path)
+
+        # ─── Warmup result, emitted HERE rather than in ready() ──────────────
+        # This is the line 28ffb2c's own message promised ("the warmup timings")
+        # and did not deliver: ready() has already run by the time the handler
+        # exists, so warmup.py's record had nowhere to go and was dropped by
+        # lastResort (WARNING+). Emitting it here, after the handler is attached,
+        # is the smallest change that makes the number land in logs/worker.log.
+        # format_result() is warmup.py's single implementation, so the two call
+        # sites cannot drift.
+        #
+        # Flag OFF is the normal case and must stay quiet at INFO: Daphne never
+        # warms, and a "not requested" line on every worker start would be noise
+        # that trains the reader to skip the section. DEBUG keeps it available
+        # to --verbose without making it a fixture.
+        from studio.apps import get_warmup_result
+        from studio.warmup import format_result
+        wr = get_warmup_result()
+        if wr is None:
+            logger.debug("warmup: not requested in this process (TS_WARMUP_MODELS unset)")
+        else:
+            logger.info(format_result("AppConfig.ready", wr))
 
         from studio.worker import WorkerLoop
 

@@ -80,6 +80,50 @@ logger = logging.getLogger(__name__)
 _RETRYABLE_FAILED = JobState.FAILED
 
 
+def runnable_jobs(now=None):
+    """
+    The ONE definition of "a job some worker may claim right now".
+
+    Extracted from WorkerLoop._poll so that scripts/guard_worker_boots.py counts
+    THIS instead of maintaining a parallel state list. The guard previously
+    defined "non-terminal" as NOT IN (done, failed, cancelled) while the poll
+    admits QUEUED *and* FAILED-with-retry-budget: a job sitting in backoff was
+    invisible to the guard yet claimable by `tsworker --once`, so the guard could
+    steal a live worker's retry. Two definitions of one concept disagreed in
+    exactly the direction that makes a check under-report. Sharing the
+    implementation is the only fix that cannot drift again by editing one file.
+
+    Returns an UNFILTERED-FURTHER queryset: no slice, no select_related. The
+    poll_batch slice and the select_related are per-caller concerns (the guard
+    wants a COUNT, which must not carry an ORDER BY or a join); the predicate is
+    the shared part.
+
+    CHAINED .filter() CALLS, NEVER A SINGLE MIXED CALL. The first version of this
+    query used filter(id=..., Q(...)) and raised SyntaxError: keyword-then-
+    positional. Every positional Q lives in its own .filter(), and that discipline
+    must survive any future edit here - it is the reason this function reads as
+    four .filter() lines rather than one.
+
+    EVENTUAL HOME IS studio/models.py as a Job manager, not this module. This
+    function needs only Job, JobState, Q, F and timezone, so living in worker.py
+    drags studio.pipeline and the audio services into every importer that wants
+    to ask "is the queue empty" - including the boot guard's subprocess. Moving it
+    is deferred rather than guessed because models.py was not read when this was
+    written, and relocating code into a file you have not read is how this
+    project has been burned repeatedly.
+    """
+    if now is None:
+        now = timezone.now()
+    return (
+        Job.objects
+        .filter(Q(state=JobState.QUEUED) | Q(state=_RETRYABLE_FAILED))
+        .filter(next_run_at__lte=now)
+        .filter(Q(lease_owner="") | Q(lease_owner__isnull=True))
+        .filter(attempts__lt=F("max_attempts"))
+        .order_by("next_run_at", "created_at")
+    )
+
+
 class LeaseHeartbeat:
     """
     Daemon thread that renews a job's lease_expires_at every `interval`
@@ -267,14 +311,7 @@ class WorkerLoop:
         """
         now = timezone.now()
         try:
-            qs = (
-                Job.objects
-                .filter(Q(state=JobState.QUEUED) | Q(state=_RETRYABLE_FAILED))
-                .filter(next_run_at__lte=now)
-                .filter(Q(lease_owner="") | Q(lease_owner__isnull=True))
-                .filter(attempts__lt=F("max_attempts"))
-                .order_by("next_run_at", "created_at")[: self.poll_batch]
-            )
+            qs = runnable_jobs(now)[: self.poll_batch]
             return list(qs.select_related("take"))
         except Exception as exc:
             logger.warning("Worker %s: poll failed: %s", self.worker_id, exc)
@@ -293,6 +330,19 @@ class WorkerLoop:
         rows and we return False -> skip. SQLite serializes writes, so this
         is correct for a single machine; multi-machine would add a Redis lock
         or Postgres SELECT ... FOR UPDATE SKIP LOCKED.
+
+        WHY THE LEASE-EMPTY PREDICATE IS REPEATED HERE AND NOT IMPORTED FROM
+        runnable_jobs(). It looks like duplication, and a future reader may be
+        tempted to collapse it. DO NOT. This filter must live in the UPDATE's own
+        WHERE clause - that placement is the entire mechanism making the claim
+        atomic. runnable_jobs() additionally constrains state and next_run_at, and
+        a job can move between the poll and this UPDATE (another worker claimed it,
+        or the sweep reclaimed it), so reusing the broader predicate would either
+        over-constrain (silently failing to claim a job we should take) or, worse,
+        be read as permission to drop the lease condition from the UPDATE - which
+        is the one line keeping two workers from ever grabbing the same job.
+        Deliberate near-duplication, same category as the two upload caps in
+        settings.py.
         """
         now = timezone.now()
         try:

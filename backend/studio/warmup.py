@@ -152,6 +152,31 @@ def _synthesize(rate: int, chans: int, dest_dir: str):
     return tmp, "synthesized"
 
 
+def format_result(reason: str, r: dict) -> str:
+    """
+    The ONE implementation of the warmup summary line.
+
+    Two call sites emit the same numbers at different levels: this module logs at
+    DEBUG (it may have no handler - ready() runs before tsworker attaches one) and
+    management/commands/tsworker.py logs at INFO (it definitely has one). Two
+    format strings that must agree is precisely the drift the project's "one entry
+    point" rule exists to prevent, so the string lives here and both sites call it.
+
+    EAGER f-string rather than lazy %s args: called exactly once per process, so
+    building the string even when DEBUG is suppressed costs one format operation.
+    Lazy args would need a tuple accessor threaded through both call sites, which
+    is more machinery than one line per process justifies. Recorded rather than
+    left as a silent style choice.
+    """
+    return (
+        f"warmup: {reason} | source={r.get('source')}"
+        f" | vad={r.get('vad_ms')}ms({r.get('vad_segments')} seg)"
+        f" | whisper={r.get('whisper_ms')}ms({r.get('whisper_segments')} seg)"
+        f" | total={r.get('total_ms')}ms | ok={r.get('ok')}"
+        + ("" if r.get("ok") else f" | issue={r.get('reason')}")
+    )
+
+
 def warmup_models(reason: str = "unspecified") -> dict:
     """
     Push one second of audio through VAD and Whisper, timings included.
@@ -217,15 +242,18 @@ def warmup_models(reason: str = "unspecified") -> dict:
         out["total_ms"] = round(1000 * (time.perf_counter() - t_all))
         _state["done"] = out["ok"]
 
-        logger.info(
-            "warmup: %s | source=%s | vad=%sms(%s seg) whisper=%sms(%s seg) "
-            "total=%sms | ok=%s%s",
-            reason, source,
-            out["vad_ms"], out["vad_segments"],
-            out["whisper_ms"], out["whisper_segments"],
-            out["total_ms"], out["ok"],
-            "" if out["ok"] else f" | issue={out['reason']}",
-        )
+        # DEBUG, not INFO - and the reason is a measurement, not a taste call.
+        # ready() runs during django.setup(), i.e. BEFORE tsworker attaches its
+        # RotatingFileHandler, so this record had no handler to reach. With no
+        # handler anywhere up the chain, logging.lastResort emits at WARNING+ and
+        # an INFO line is dropped silently. Evidence, from this repo's own log:
+        # logs/worker.log contains ZERO warmup lines after three warmed starts,
+        # while the 4.312 s wall-clock gap between the plain and warmed runs
+        # proves the warmup did run. The failure paths below use logger.warning
+        # and DO reach lastResort, so failures shouted and successes whispered -
+        # which is why nobody noticed. The authoritative INFO line is emitted by
+        # tsworker, where a handler exists, via format_result() above.
+        logger.debug(format_result(reason, out))
         return out
 
     except Exception as exc:

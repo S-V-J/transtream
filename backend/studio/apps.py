@@ -47,6 +47,21 @@ logger = logging.getLogger(__name__)
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
+# The warmup's measured result, stashed for the one process that has a log handler
+# attached. ready() runs during django.setup(), i.e. before tsworker's
+# RotatingFileHandler exists, so warmup's own record cannot reach logs/worker.log
+# (see studio.warmup.format_result's comment). Rather than move the handler earlier
+# - which would put a worker log file in Daphne, in manage.py check, and in every
+# harness script, the exact opposite of why the flag is an env var - ready() keeps
+# the dict and the command emits it. Storing data is not the same as configuring
+# logging, and this keeps that separation intact.
+_warmup_result = None
+
+
+def get_warmup_result():
+    """The dict from this process's warmup, or None if it did not run."""
+    return _warmup_result
+
 
 class StudioConfig(AppConfig):
     name = 'studio'
@@ -57,7 +72,9 @@ class StudioConfig(AppConfig):
             return
         try:
             from studio.warmup import warmup_models
+            global _warmup_result
             result = warmup_models("AppConfig.ready")
+            _warmup_result = result
             if not result.get("ok"):
                 logger.warning(
                     "warmup: incomplete (%s); the first take will still pay the "

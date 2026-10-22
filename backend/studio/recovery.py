@@ -29,15 +29,20 @@ errors accumulated). A partial sweep beats no sweep.
      backoff. A stale lease on a terminal row is harmless cosmetic metadata.
 
   2. ORPHANED TEMP FILE DELETION
-     .ts_part_* / .ts_snap_* / .ts_live_* in RECORDINGS_DIR with mtime older
+     .ts_part_* / .ts_snap_* / .ts_live_* / .ts_warm_* in RECORDINGS_DIR with mtime older
      than RECOVERY_ORPHAN_MAX_AGE (default 3600 s). Younger files are LEFT
      ALONE: an active recording session (consumer) or an in-flight live
      preview (consumer) may still hold them open.
        .ts_part_*  = temp writer never finalized (consumer crashed pre-stop)
        .ts_snap_*  = live-preview snapshot leaked by a SIGKILL mid-preview
        .ts_live_*  = live-preview intermediate WAV leaked the same way
+         .ts_warm_*  = warmup's 1 s slice, leaked by a SIGKILL mid-warmup
      None of these have a Take row (Take stores the FINAL renamed path), so
-     they are pure disk leaks.
+     they are pure disk leaks. This enumeration and _TEMP_PATTERNS further down
+       are the SAME FOUR PREFIXES written twice: the docstring is what a reader
+       trusts, the tuple is what the code executes. Add a fifth temp prefix
+       anywhere in the codebase and BOTH must gain it, or the next reader will
+       trust a list that the sweeper does not act on.
 
 Returns dict: {"leases_reclaimed": int, "orphans_deleted": int, "errors": [str]}.
 """
@@ -61,7 +66,19 @@ _NON_TERMINAL_INFLIGHT = [
 ]
 
 # Temp globs that must never outlive a session.
-_TEMP_PATTERNS = (".ts_part_*", ".ts_snap_*", ".ts_live_*")
+# Every dot-prefixed temp prefix the codebase creates MUST be listed here,
+# because this tuple is the only backstop for a leaked temp file. Three places try
+# to clean up after themselves - SessionWriter.finalize(), the live-preview
+# finally-block, and warmup's finally-block - and all three can be defeated by
+# SIGKILL. A prefix absent from this list is a file that can leak forever, because
+# nothing else ever globs RECORDINGS_DIR.
+#
+# .ts_warm_* was introduced by studio/warmup.py in the same phase as this file's
+# other three entries and was NOT registered here. Caught by reading recovery.py
+# end to end, not by any test: the warmup's finally-block demonstrably works
+# (residue measured 0 across five starts), so nothing was observable until a
+# SIGKILL mid-warmup - and startup is precisely when processes get Ctrl-C'd.
+_TEMP_PATTERNS = (".ts_part_*", ".ts_snap_*", ".ts_live_*", ".ts_warm_*")
 
 
 def _reclaim_expired_leases() -> tuple[int, list[str]]:
