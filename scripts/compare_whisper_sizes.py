@@ -31,8 +31,11 @@ the same getattr() the production path uses.
 WHY IT CALLS THE PROJECT'S OWN FUNCTION. Reimplementing the decode call would
 mean copying beam_size, vad_filter, condition_on_previous_text and friends from
 a reading of the source - and a copy that drifts measures something other than
-production. Importing transcribe() makes the arguments production by
-construction, so the ONLY variable between arms is the model size. The function
+production. Importing transcribe_audio() makes the arguments production by
+construction, so the ONLY variable between arms is the model size. The child
+calls fn(wav) with one positional argument, so beam_size stays at its default
+5 and language stays at None; settings.WHISPER_LANGUAGE defaults to the empty
+string that resolves to None, so the pin does not perturb the comparison. The function
 name and signature are taken from the module at runtime and printed before any
 measurement starts, so a rename cannot silently produce a zero.
 
@@ -162,7 +165,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sizes", default="tiny,base,small")
     ap.add_argument("--wav", default=None, help="audio to transcribe (normalized WAV preferred)")
-    ap.add_argument("--fn", default="transcribe", help="callable in studio.transcription_service")
+    ap.add_argument("--fn", default="transcribe_audio", help="callable in studio.transcription_service")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--json", action="store_true", help="dump full transcripts to a file")
     args = ap.parse_args()
@@ -239,7 +242,7 @@ def main():
     print("  Reading the table: a size earns its decode cost only if targets/9 rises")
     print("  AND controls/4 stays at 4/4. Wall seconds are for THIS file only - the")
     print("  production path also pays VAD and normalization, which are identical")
-    print("  across arms here because every arm calls the same transcribe().")
+    print("  across arms here because every arm calls the same transcribe_audio().")
     if args.json:
         out = REPO / "logs" / "whisper_size_compare.json"
         out.write_text(json.dumps(dump, indent=2, ensure_ascii=False))
