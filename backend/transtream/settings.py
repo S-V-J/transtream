@@ -145,7 +145,10 @@ MEDIA_ROOT = REPO_ROOT / "media"
 RECORDINGS_DIR = MEDIA_ROOT / "recordings"
 
 STUDIO_MAX_TAKE_BYTES = 512 * 1024 * 1024
-STUDIO_STATS_EVERY_CHUNKS = 20
+# Was a bare literal, which made the service read at consumers.py:603
+# satisfiable but the documented knob inert; now an env read with the
+# same 20 as its fallback, so nothing changes unless someone asks.
+STUDIO_STATS_EVERY_CHUNKS = int(os.getenv("STUDIO_STATS_EVERY_CHUNKS", "20"))
 
 # ─── FFmpeg / Audio Normalization (Phase 3) ────────────────────────────────
 FFMPEG_BIN = os.getenv("FFMPEG_BIN", "ffmpeg")
@@ -164,6 +167,39 @@ VAD_MIN_SILENCE_MS = int(os.getenv("VAD_MIN_SILENCE_MS", "500"))
 # Padding (ms) added before/after each detected speech region
 # to avoid clipping the first/last phoneme.
 VAD_SPEECH_PAD_MS = int(os.getenv("VAD_SPEECH_PAD_MS", "30"))
+
+# ─── Faster-Whisper Transcription (Phase 5) ───────────────────────────────────
+# These were read by their services with in-code fallbacks and never assigned
+# here, so editing .env changed nothing and the pipeline silently ran the
+# smallest model. Defaults are copied verbatim from the fallbacks
+# (transcription_service.py:65-67, consumers.py:554) so wiring the read cannot
+# alter behaviour for anyone who sets nothing - the same shape as the
+# UPLOAD_MAX_BYTES no-op in commit 0926812.
+#
+# WHISPER_MODEL_SIZE is the accuracy lever, and it is not free: tiny (39M params)
+# renders English content words well and domain proper nouns badly. Only tiny is
+# in the hub cache today, so a larger value is a download decision; scripts/
+# compare_whisper_sizes.py measures what a size actually buys on real audio.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+
+# Empty string means auto-detect, which is what this project has always done, so
+# shipping this line changes nothing until someone sets a value. Pin it to the
+# language you actually speak and the model stops spending capacity on a guess it
+# gets wrong on code-switched audio (observed: a Hindi utterance classified 'id').
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")
+
+# Frames between live-preview runs. <= 0 is the documented kill switch; the
+# service wraps this one read in try/except and falls back to 30 on a bad value,
+# so a typo here degrades to the default instead of killing the consumer.
+LIVE_TRANSCRIBE_EVERY_CHUNKS = int(os.getenv("LIVE_TRANSCRIBE_EVERY_CHUNKS", "30"))
+
+# WHISPER_DETERMINISTIC is deliberately NOT assigned here. It is the one knob of
+# this group that already works: tsworker.py:81 reads os.getenv directly and pins
+# OMP_NUM_THREADS=1 before ctranslate2 is imported, and load_dotenv has populated
+# os.environ by then. Moving it onto settings would be a behaviour change dressed
+# as a tidy-up, so it stays on its existing route and the README says so.
 
 # ─── Upload ingest + public API (Phases 7/8) ─────────────────────────────────
 # Both names were advertised in .env.example from Phase 7 but never read here,
@@ -186,6 +222,20 @@ UPLOAD_MAX_BYTES = int(os.getenv("UPLOAD_MAX_BYTES", str(100 * 1024 * 1024)))
 # pollers' own intervals rather than chosen. api_auth's fallback stays 10 as a
 # last resort if this attribute is ever removed.
 UPLOAD_RATE_LIMIT_PER_MINUTE = int(os.getenv("UPLOAD_RATE_LIMIT_PER_MINUTE", "120"))
+
+# ─── Background worker + recovery (Phase 6b) ─────────────────────────────────
+# Six reads, all of them already in worker.py:196-215 and recovery.py:139 behind
+# getattr() fallbacks, none of them assigned here - so the .env lines the README
+# documents for poll interval, lease, heartbeat and concurrency changed nothing,
+# and WORKER_POLL_BATCH was a real control that was documented nowhere at all.
+# Types are copied from the wrapping calls at those sites: poll_interval is
+# float(), the other five are int().
+WORKER_POLL_INTERVAL = float(os.getenv("WORKER_POLL_INTERVAL", "2.0"))
+WORKER_LEASE_DURATION = int(os.getenv("WORKER_LEASE_DURATION", "120"))
+WORKER_HEARTBEAT_INTERVAL = int(os.getenv("WORKER_HEARTBEAT_INTERVAL", "30"))
+WHISPER_MAX_CONCURRENT = int(os.getenv("WHISPER_MAX_CONCURRENT", "1"))
+WORKER_POLL_BATCH = int(os.getenv("WORKER_POLL_BATCH", "5"))
+RECOVERY_ORPHAN_MAX_AGE = int(os.getenv("RECOVERY_ORPHAN_MAX_AGE", "3600"))
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 

@@ -126,7 +126,7 @@ def _load_pcm16k_mono(wav_path: Path) -> np.ndarray:
 
 # ─── Public API ────────────────────────────────────────────────────────────
 
-def transcribe_audio(wav_path: Path, beam_size: int = 5) -> dict:
+def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = None) -> dict:
     """
     Transcribe a normalized 16 kHz mono PCM WAV.
 
@@ -134,6 +134,11 @@ def transcribe_audio(wav_path: Path, beam_size: int = 5) -> dict:
         wav_path:  path to a *complete* WAV produced by Phase 3 normalization.
         beam_size: 5 for the authoritative post-stop pass (best accuracy);
                    1 for the live rolling preview (best latency).
+        language:  ISO-639-1 code to force, or None to take the WHISPER_LANGUAGE
+                   setting (which itself defaults to "" = auto-detect). Callers
+                   that pass nothing behave exactly as before. Pin it when the
+                   audio language is known: detection is a guess, and on
+                   code-switched speech it guesses wrong.
 
     Returns:
         {
@@ -155,9 +160,17 @@ def transcribe_audio(wav_path: Path, beam_size: int = 5) -> dict:
     audio = _load_pcm16k_mono(wav_path)      # <- ndarray, so av is never invoked
     model = get_model()
 
+    # Explicit argument > deployment setting > auto-detect. The empty-string case
+    # maps to None so that WHISPER_LANGUAGE= in a shell means "detect", not "the
+    # language literally called empty". None from the library is its own
+    # auto-detect default (faster-whisper 1.2.1 signature, read not recalled).
+    lang = language if language is not None else (
+        str(getattr(settings, "WHISPER_LANGUAGE", "")).strip() or None)
+
     try:
         segments_iter, info = model.transcribe(
             audio,                            # NOTE: array, not path
+            language=lang,                    # None -> the library auto-detect
             beam_size=max(1, int(beam_size)),
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
