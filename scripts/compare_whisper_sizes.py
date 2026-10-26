@@ -194,6 +194,13 @@ def main():
     print()
 
     rows, dump = [], {}
+    # The docstring scopes the regression signal to "on a larger size", and the
+    # footer's rule ("controls/4 stays at 4/4") asserts a cross-arm comparison.
+    # Both need the first arm's control set held across the loop; without it the
+    # lost line prints from each arm's own misses - which is how the baseline
+    # arm once reported losing four words relative to itself.
+    first_controls = None
+    first_size = None
     for size in [s.strip() for s in args.sizes.split(",") if s.strip()]:
         if have and size not in have:
             print(f"── {size:<8} SKIPPED: not in the hub cache"
@@ -217,18 +224,21 @@ def main():
             rows.append((size, None, None, None, None, f"ERROR: {d['error'][:60]}"))
             continue
         t, c = score(d["text"])
+        if first_controls is None:
+            first_controls, first_size = set(c), size
         dump[size] = d
         rt = d["seconds"] / (pathlib.Path(wav).stat().st_size / 1_000_000_000 * 8)  # rough
         print(f"── {size:<8} {d['seconds']:>7.2f} s wall | lang={d['language']} "
               f"({(d['probability'] or 0):.2f}) | {d['n_segments']} seg | {d['chars']} chars")
         print(f"   targets recovered {len(t)}/{len(TARGETS)}: {', '.join(t) or '(none)'}")
-        print(f"   controls intact   {len(c)}/{len(CONTROLS)}: {', '.join(c) or '(NONE - regression!)'}")
+        print(f"   controls intact   {len(c)}/{len(CONTROLS)}: {', '.join(c) or '(none in this audio)'}")
         missing = [w for w in TARGETS if w not in t]
         if missing:
             print(f"   still wrong      : {', '.join(missing)}")
-        lost = [w for w in CONTROLS if w not in c]
-        if lost:
-            print(f"   *** lost vs tiny  : {', '.join(lost)}")
+        if size != first_size:
+            lost = sorted(first_controls - set(c))
+            if lost:
+                print(f"   *** lost vs {first_size} : {', '.join(lost)}")
         rows.append((size, d["seconds"], d["n_segments"], len(t), len(c), ""))
 
     print()
