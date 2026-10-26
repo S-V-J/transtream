@@ -372,6 +372,18 @@ Every value is read with a safe default (`getattr(settings, KEY, default)`), so 
 | `VAD_THRESHOLD` | `0.5` | Silero probability threshold. Higher is stricter. |
 | `VAD_MIN_SILENCE_MS` | `500` | Silence needed to split two speech regions. |
 | `VAD_SPEECH_PAD_MS` | `30` | Padding before and after each region, so phonemes aren't clipped. |
+| `WHISPER_MODEL_SIZE` | `tiny` | The accuracy lever, and not a free one: `tiny` is 39M params, `base` roughly 2x the decode cost, `small` roughly 6x. Only `tiny` is in the Hub cache by default, so a larger value is a download, not an edit. `scripts/compare_whisper_sizes.py` measures what a size buys on your audio. |
+| `WHISPER_DEVICE` | `cpu` | CTranslate2 device. `cuda` needs a GPU build of ctranslate2; this project's measured numbers are all `cpu`. |
+| `WHISPER_COMPUTE_TYPE` | `int8` | Quantisation. `int8` is the CPU default and the reason a 122 s take finishes in seconds. |
+| `WHISPER_LANGUAGE` | unset (= auto-detect) | ISO-639-1 code to pin, e.g. `hi`. Empty reproduces auto-detect exactly, so shipping the knob changed nothing. Detection is a guess, and it guessed `id` for a Hindi utterance on this machine and returned romanized noise; pin it when you know the language. |
+| `LIVE_TRANSCRIBE_EVERY_CHUNKS` | `30` | Frames between rolling-preview runs. `<= 0` is the documented kill switch, and this is the one read wrapped in try/except, so a typo degrades to the default instead of killing the consumer. |
+| `WHISPER_MAX_CONCURRENT` | `1` | The concurrency semaphore: one job in flight per worker process. |
+| `WORKER_POLL_INTERVAL` | `2.0` | Seconds between queue polls. A **float** - the worker wraps it in `float()`, which is why `2` and `2.0` are not the same claim. |
+| `WORKER_LEASE_DURATION` | `120` | Lease length in seconds ([decision 7](#7-durability-by-lease-not-by-notification)). |
+| `WORKER_HEARTBEAT_INTERVAL` | `30` | Heartbeat period. Must stay well under the lease or the sweep reclaims live work. |
+| `WORKER_POLL_BATCH` | `5` | Rows fetched per poll. |
+| `RECOVERY_ORPHAN_MAX_AGE` | `3600` | Age in seconds before the startup sweep treats a dot-prefixed temporary as an orphan. |
+| `WHISPER_DETERMINISTIC` | unset | **Not a `settings.py` read, on purpose.** `tsworker.py` takes it from `os.environ` directly because it must pin `OMP_NUM_THREADS=1` before CTranslate2 spawns its pool. Setting it in `.env` still works, because `load_dotenv` runs first. |
 | `STUDIO_MAX_TAKE_BYTES` | `512 MB` | Hard cap per microphone take. It force-saves and stops when exceeded. |
 | `STUDIO_STATS_EVERY_CHUNKS` | `20` | How often live stats are pushed to the browser. |
 | `UPLOAD_MAX_BYTES` | `100 MB` | Hard cap per upload, enforced before and during streaming. |
@@ -382,7 +394,7 @@ Every value is read with a safe default (`getattr(settings, KEY, default)`), so 
 
 > **Two caps, on purpose.** `STUDIO_MAX_TAKE_BYTES` (512 MB) covers the microphone path and `UPLOAD_MAX_BYTES` (100 MB) covers uploads. They differ deliberately: a live take is bounded by a human speaking, while an upload is bounded by a stranger. Please don't merge them.
 
-> **Whisper and live-preview knobs: read this before touching them.** `WHISPER_MODEL_SIZE`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `LIVE_TRANSCRIBE_EVERY_CHUNKS` and `WHISPER_DETERMINISTIC` are read by their services with defaults set in code, and you can see those defaults in the worker log: `Loading Faster-Whisper model (size=tiny, device=cpu, compute=int8)`, preview at `beam=1`, post-stop at `beam=5`. They are **not currently assigned in `settings.py`**, so setting them in `.env` may do nothing until a read is added there. `UPLOAD_MAX_BYTES` and `UPLOAD_RATE_LIMIT_PER_MINUTE` had the same gap, which I closed in commit `0926812`, and I don't want the README to over-promise a second time. Either set the model size in the service or add the read first. The discriminator in [Verification](#verification) tells you which knobs are wired in a single command.
+> **Whisper and live-preview knobs: these are wired now.** `WHISPER_MODEL_SIZE`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_LANGUAGE`, `LIVE_TRANSCRIBE_EVERY_CHUNKS`, `STUDIO_STATS_EVERY_CHUNKS`, `WHISPER_MAX_CONCURRENT`, the six `WORKER_*`/`RECOVERY_*` knobs are all assigned in `settings.py` as of commit `806b11d`, so editing them in `.env` changes behaviour. Defaults were copied verbatim from the services' own `getattr` fallbacks, so wiring the read changed nothing for anyone who sets nothing - the same shape as the `UPLOAD_MAX_BYTES` gap closed in `0926812`. Two exceptions, both deliberate. `WHISPER_DETERMINISTIC` is still read straight from `os.environ` by `tsworker.py`, because it has to pin `OMP_NUM_THREADS=1` before CTranslate2 is imported; moving it onto settings would be a behaviour change dressed as a tidy-up. And the `vad_parameters=dict(min_silence_duration_ms=500)` inside the Whisper call is still a hardcode, because whether it should track `VAD_MIN_SILENCE_MS` is an open design question ([decision 10](#10-there-are-two-vad-passes-and-they-are-different-engines)), not a knob to steal. One consequence worth knowing: these reads are unguarded `int()`/`float()`, so a malformed value raises at import and stops every process, `manage.py check` included - the same crash-on-typo shape `VAD_MIN_SILENCE_MS` has had since Phase 4. Silent reversion to a default was rejected, because nobody would ever learn their `.env` was broken. The discriminator in [Verification](#verification) still tells you which knobs are wired in a single command.
 
 ## Storage layout
 
@@ -543,7 +555,7 @@ The cold-load numbers are why startup warmup is on the roadmap, and one measured
 | Orphan adoption on mic disconnect, into the durable queue | Next. **Must be in `disconnect`, not in the recovery sweep**: the mic layout is flat (`media/recordings/TS_REC_RAW_*`) with no user id in the path, so a sweep cannot attribute an orphan to an owner, while `disconnect` has `scope["user"]`. The `NOTE (6b)` comment in `consumers.py` says the sweep will adopt orphans; under the current layout it cannot. Landing this also moves the mic path onto the queue, which is why it rides with "Unified storage layout" below rather than ahead of it. |
 | Unified storage layout (mic path moves to per-user dirs) | Next |
 | Parallel upload stress test | Next |
-| Wire the Whisper and live-preview knobs into `settings.py` | Next |
+| Wire the Whisper and live-preview knobs into `settings.py` | **Done** (commit `806b11d`). Twelve reads now assigned, defaults copied verbatim from the services' fallbacks so nothing changed for anyone who sets nothing. `WHISPER_DETERMINISTIC` deliberately left on its `os.environ` route, and the `vad_parameters` hardcode left as an open design question rather than quietly turned into a knob. |
 | Delete / purge endpoint for takes | Planned |
 | Argos Translate (offline NMT) | Planned |
 | Piper TTS and voice avatars | Planned |
@@ -564,7 +576,7 @@ The cold-load numbers are why startup warmup is on the roadmap, and one measured
 - **Uploaded takes pile up on disk**, because there's no delete endpoint yet.
 - **Revoked API keys stay listed** on the account page (there's no purge), so a heavily tested instance collects rows.
 - **The microphone and upload paths use different on-disk layouts** today, and the microphone path doesn't go through the durable queue yet. Both are open work on the roadmap.
-- **The five Whisper / live-preview knobs may not respond to `.env`** until they're read in `settings.py`. See the note under [Configuration](#configuration).
+- **A malformed knob value stops every process, by design.** The Whisper, live-preview, worker and recovery reads in `settings.py` are unguarded `int()`/`float()` conversions, so `WORKER_POLL_INTERVAL=two` raises `ValueError` at settings import and kills Daphne, the worker and `manage.py check` alike. This matches `VAD_MIN_SILENCE_MS`, which has behaved that way since Phase 4. The alternative - falling back to the default - was rejected because a silently-ignored typo is the worse failure: nobody would ever learn their `.env` was broken. `LIVE_TRANSCRIBE_EVERY_CHUNKS` is the one exception; the service wraps that read in try/except and degrades to 30. The superseded note here said the five knobs might be ignored by `.env`; as of commit `806b11d` they are read, which is why the note had to change.
 
 ## Contributing
 
