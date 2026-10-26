@@ -4,9 +4,9 @@
 WHY THIS EXISTS. The transcripts on this machine render English content words
 well and domain proper nouns badly - "Kamailio" arrives as "KMLU", "Terraform"
 as "telephone", "Ansible" as "n-seval". The cause was confirmed by execution,
-not by reading: settings.py assigns no WHISPER_MODEL_SIZE, so
-transcription_service.py's getattr fallback ("tiny") fires and the 39M-parameter
-model does the work. The fix is a one-line settings read; the OPEN question is
+not by reading: before commit 806b11d settings.py assigned no WHISPER_MODEL_SIZE,
+so transcription_service.py's getattr fallback ("tiny") fired and the 39M-parameter
+model did the work. 806b11d closed that gap; the OPEN question is
 which size earns its decode cost on THIS audio. This script answers that with a
 number instead of an impression.
 
