@@ -3,22 +3,33 @@ set -euo pipefail
 
 # ─── TranStream CLI — Robust Dynamic Port Edition ───────────────────────────
 #
-#   transtream start       Find free port → start Redis if needed → start Daphne
-#   transtream stop        Stop Daphne and Redis only if this script started them
-#   transtream restart     Stop → start
-#   transtream status      Show port, process/unit state, bindings, auto-run state
-#   transtream logs        Tail Daphne logs
-#   transtream enable      Install systemd user service for optional auto-run
-#   transtream disable     Remove systemd user service
-#   transtream help        Show help
+#   transtream start             Redis if needed → Daphne → the queue worker
+#   transtream start --no-worker App only (uploads queue until a worker runs)
+#   transtream stop              Stop Daphne, worker, Redis - only what it started
+#   transtream restart           Stop → start (flags pass through)
+#   transtream status            Port, process/unit state, bindings, auto-run, worker
+#   transtream logs [worker]     Tail app+redis+worker, or just the worker
+#   transtream enable            Install BOTH systemd user services (app + worker)
+#   transtream disable           Remove both
+#   transtream help              Show help
 #
 # Rules:
 #   • NEVER kills a process it did not start.
-#   • Default preferred port: 8000.
-#   • If preferred port is busy, scans upward for first free port.
-#   • Uses systemd user transient service when available.
-#   • Falls back to setsid/nohup when systemd user is unavailable.
+#   • Default preferred port: 8000; scans upward if busy; chosen port persisted.
+#   • Uses systemd user transient service when available, setsid/nohup otherwise.
 #   • No auto-run by default.
+#   • Refuses to start on an unmigrated database, and names the migrate command.
+#   • The worker follows the REDIS ownership pattern, not the Daphne one: a human
+#     may already be running one (the A/B harness, or a terminal), so a foreign
+#     worker is DETECTED AND REPORTED, never signalled. Killing it would break the
+#     rule above and would make the harness's abort-if-alive meaningless.
+#
+# HEREDOC POLICY, stated because it cost a draft: this file may contain heredocs
+# only where the body is a systemd unit or the help text - i.e. only `EOF`, only
+# at column 0, and balanced. Program logic that used to be embedded as
+# `python - <<'PYEOF'` lives in scripts/ as a real file (check_migrations.py),
+# where it gets a py_compile gate and a selftest. A nested heredoc has no opener
+# that fails loudly when its body is dropped in a paste; a missing file does.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
@@ -27,20 +38,43 @@ PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")/.." && pwd)"
 VENV_DIR="$PROJECT_DIR/venv"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_DIR="$PROJECT_DIR/logs"
+CHECK_MIGRATIONS="$PROJECT_DIR/scripts/check_migrations.py"
 
 PID_FILE="$LOG_DIR/daphne.pid"
 REDIS_PID_FILE="$LOG_DIR/redis.pid"
 PORT_FILE="$LOG_DIR/transtream.port"
 UNIT_FILE="$LOG_DIR/daphne.unit"
 
+# ─── worker identity files ──────────────────────────────────────────────────
+# Deliberately disjoint from the app's, so stop cannot signal the wrong unit and
+# status can report both independently. Tiering note for the append-only gate:
+# *.pid and *.unit are MUTABLE POINTERS (this script deletes them on a failed
+# start, exactly as it already deletes daphne.unit); tsworker.out and worker.log
+# are ARTIFACTS and are only ever appended to.
+WORKER_PID_FILE="$LOG_DIR/tsworker.pid"
+WORKER_UNIT_FILE="$LOG_DIR/tsworker.unit"
+WORKER_OUT_FILE="$LOG_DIR/tsworker.out"
+
 PREFERRED_PORT="${TRANSTREAM_PORT:-8000}"
 APP_HOST="${TRANSTREAM_HOST:-127.0.0.1}"
 REDIS_PORT="${TRANSTREAM_REDIS_PORT:-6379}"
 
+# ─── worker opt-out ─────────────────────────────────────────────────────────
+# Default ON, because without a consumer an upload is accepted, persisted, queued
+# and never processed - the README's own "Terminal 2: the worker. Without it,
+# uploads stay QUEUED forever". TRANSTREAM_WORKER=0 is the scripted form,
+# --no-worker the interactive one. The A/B harness needs it: it pkills
+# `manage.py tsworker` (ab_warmup_first_take.py:609) and aborts if any worker is
+# alive at start, so a measurement run must be able to say "app only".
+START_WORKER="${TRANSTREAM_WORKER:-1}"
+
 APP_UNIT_PREFIX="transtream-app"
+WORKER_UNIT_PREFIX="transtream-worker"
+WORKER_SERVICE_NAME="transtream-worker"
 SERVICE_NAME="transtream"
 USER_SERVICE_DIR="$HOME/.config/systemd/user"
 USER_SERVICE_FILE="$USER_SERVICE_DIR/${SERVICE_NAME}.service"
+WORKER_SERVICE_FILE="$USER_SERVICE_DIR/${WORKER_SERVICE_NAME}.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -175,6 +209,215 @@ stop_redis_if_we_started() {
     fi
 }
 
+# ─── start-path guard: refuse on an unmigrated database ─────────────────────
+# WHY A REFUSAL AND NOT AN AUTOMATIC MIGRATE. `migrate` writes to db.sqlite3. A
+# CLI that silently mutates a database the operator did not ask it to touch is the
+# same category of surprise as signalling a process it did not start, so the rule
+# is the same: name the exact command and stop.
+#
+# WHY IT CALLS A FILE. The first draft embedded the probe as an inline heredoc;
+# the body was dropped in a paste and bash -n caught an unterminated document.
+# See scripts/check_migrations.py's docstring for the full account.
+#
+# WHY IT BRANCHES ON A TOKEN. `local out; out=$(...)` under `set -e` would abort
+# the script on a non-zero probe exit, so the status is captured with `|| rc=$?`,
+# which makes the compound succeed and leaves rc holding the real value. The
+# branch then reads the first word of stdout - the channel that carries the
+# answer - and never greps a traceback.
+require_migrations_applied() {
+    if [ ! -f "$CHECK_MIGRATIONS" ]; then
+        err "Missing $CHECK_MIGRATIONS - the start guard cannot run without it."
+        exit 1
+    fi
+
+    local out rc=0
+    out=$("$VENV_DIR/bin/python" "$CHECK_MIGRATIONS" 2>&1) || rc=$?
+
+    case "${out%% *}" in
+        APPLIED)
+            if [ "$rc" = "0" ]; then
+                return 0
+            fi
+            ;;
+        PENDING)
+            err "Unapplied migrations: ${out#PENDING: }"
+            err "The studio page and the queue worker both need these tables; starting"
+            err "them now yields a 500 page and a worker that dies in its recovery sweep."
+            err "Run: (cd $BACKEND_DIR && $VENV_DIR/bin/python manage.py migrate)"
+            exit 1
+            ;;
+        DEPS_MISSING)
+            err "Dependencies are not installed in $VENV_DIR (${out#DEPS_MISSING: })"
+            err "Run: $VENV_DIR/bin/pip install -r $PROJECT_DIR/requirements.txt"
+            exit 1
+            ;;
+        ERROR)
+            err "Could not inspect migrations: ${out#ERROR: }"
+            exit 1
+            ;;
+    esac
+
+    err "check_migrations.py gave an unrecognised answer (rc=$rc): ${out:-<empty output>}"
+    printf '%s\n' "$out" | tail -n 4 >&2
+    exit 1
+}
+
+# ─── the queue worker ───────────────────────────────────────────────────────
+# Without this process an upload is accepted, persisted, queued and never
+# processed - a correct UI reporting a missing operator action. This makes one
+# command satisfy the README line that has said so since Phase 6b.
+worker_foreign_running() {
+    pgrep -f "manage.py tsworker" >/dev/null 2>&1
+}
+
+worker_we_started() {
+    [ -f "$WORKER_PID_FILE" ] || [ -f "$WORKER_UNIT_FILE" ]
+}
+
+start_worker() {
+    # Foreign worker: report and leave it alone. This is the redis pattern, and it
+    # is what keeps `transtream stop` honest - it can only stop what it recorded.
+    if worker_foreign_running && ! worker_we_started; then
+        warn "A tsworker is already running that this script did not start."
+        warn "Leaving it alone; uploads are being served by that process."
+        pgrep -af "manage.py tsworker" | sed 's/^/    /' >&2 || true
+        return 0
+    fi
+
+    if [ ! -x "$VENV_DIR/bin/python" ]; then
+        err "Python not found at $VENV_DIR/bin/python"
+        err "Activate venv and install requirements first."
+        return 1
+    fi
+
+    info "Starting the queue worker (uploads are not processed without it)..."
+
+    # TS_WARMUP_MODELS is set HERE, on the launch line, and deliberately NOT in
+    # .env: README:381 records that AppConfig.ready() also runs in Daphne and in
+    # every one-off command, and a .env flag cannot tell them apart. The measured
+    # trade is ~2.6-3.8 s once at startup against ~2.1-2.4 s of worker time off
+    # every user's first take (A/B runs #3 and #4, worker clock).
+    if has_systemd_user; then
+        local unit
+        unit="${WORKER_UNIT_PREFIX}-$(date +%s)-$$"
+        echo "$unit" > "$WORKER_UNIT_FILE"
+
+        systemd-run --user --quiet \
+            --unit="$unit" \
+            --working-directory="$BACKEND_DIR" \
+            --setenv=PYTHONUNBUFFERED=1 \
+            --setenv=DJANGO_SETTINGS_MODULE=transtream.settings \
+            --setenv=TS_WARMUP_MODELS=1 \
+            --property=StandardOutput=append:"$WORKER_OUT_FILE" \
+            --property=StandardError=append:"$WORKER_OUT_FILE" \
+            "$VENV_DIR/bin/python" manage.py tsworker --verbose
+
+        sleep 3
+
+        if systemctl --user is-active --quiet "$unit"; then
+            ok "Worker started as systemd user unit $unit"
+            return 0
+        fi
+
+        err "Worker systemd unit failed to stay active."
+        err "Recent journal:"
+        journalctl --user -u "$unit" -n 40 --no-pager >&2 || true
+        rm -f "$WORKER_UNIT_FILE"
+        return 1
+    fi
+
+    warn "systemd user session not available. Using setsid/nohup fallback for the worker."
+
+    # The $! below is the real worker pid ONLY BECAUSE this script runs
+    # non-interactively: setsid(1) forks when its caller is already a process-group
+    # leader, and in an interactive shell a backgrounded job is one, so $! would be
+    # a parent that exits immediately and the check below would report failure on a
+    # healthy worker. As a script, job control is off, setsid does not fork, and $!
+    # is the process we then signal. The same condition holds for the Daphne
+    # fallback below. Recorded here because it is invisible to bash -n and to every
+    # test that has ever passed.
+    if command -v setsid >/dev/null 2>&1; then
+        ( cd "$BACKEND_DIR" && setsid nohup "$VENV_DIR/bin/python" manage.py tsworker --verbose \
+            </dev/null >> "$WORKER_OUT_FILE" 2>&1 & echo $! ) > "$WORKER_PID_FILE.tmp"
+    else
+        ( cd "$BACKEND_DIR" && nohup "$VENV_DIR/bin/python" manage.py tsworker --verbose \
+            </dev/null >> "$WORKER_OUT_FILE" 2>&1 & echo $! ) > "$WORKER_PID_FILE.tmp"
+    fi
+    mv "$WORKER_PID_FILE.tmp" "$WORKER_PID_FILE"
+
+    local pid
+    pid=$(cat "$WORKER_PID_FILE")
+    disown "$pid" 2>/dev/null || true
+
+    sleep 3
+
+    if kill -0 "$pid" 2>/dev/null; then
+        ok "Worker started (PID: $pid)"
+        return 0
+    fi
+
+    # Degrade to a warning rather than a false failure: if the recorded pid is gone
+    # but a tsworker of ours is verifiably running, the process is fine and only the
+    # bookkeeping is stale. Reporting "failed" here would send the operator to tail
+    # a log that says everything is healthy - the worst kind of wrong diagnosis.
+    if worker_foreign_running; then
+        warn "Worker pid $pid is not addressable, but a tsworker IS running."
+        warn "Treating the worker as up; ownership bookkeeping may be stale."
+        pgrep -af "manage.py tsworker" | sed 's/^/    /' >&2 || true
+        return 0
+    fi
+
+    err "Worker fallback process failed to start."
+    err "Recent log:"
+    tail -n 30 "$WORKER_OUT_FILE" >&2 || true
+    rm -f "$WORKER_PID_FILE"
+    return 1
+}
+
+stop_worker_if_we_started() {
+    # Mirror of stop_redis_if_we_started: act only on what we recorded, and say so
+    # out loud when we did not.
+    if has_systemd_user && [ -f "$WORKER_UNIT_FILE" ]; then
+        local unit
+        unit=$(cat "$WORKER_UNIT_FILE" 2>/dev/null || echo "")
+
+        if [ -n "$unit" ]; then
+            info "Stopping worker systemd user unit: $unit"
+            systemctl --user stop "$unit" >/dev/null 2>&1 || true
+        fi
+
+        rm -f "$WORKER_UNIT_FILE"
+    fi
+
+    if has_systemd_user; then
+        systemctl --user stop "$WORKER_SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+
+    if [ -f "$WORKER_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$WORKER_PID_FILE")
+
+        if kill -0 "$pid" 2>/dev/null; then
+            info "Stopping fallback worker (PID: $pid)..."
+            kill "$pid" 2>/dev/null || true
+            sleep 2
+
+            if kill -0 "$pid" 2>/dev/null; then
+                warn "Force killing fallback worker (PID: $pid)..."
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+
+            ok "Fallback worker stopped"
+        fi
+
+        rm -f "$WORKER_PID_FILE"
+    elif ! worker_foreign_running; then
+        info "No worker was started by this script."
+    else
+        warn "A tsworker is running that this script did not start. Leaving it alone."
+    fi
+}
+
 fallback_pid_running() {
     if [ -f "$PID_FILE" ]; then
         local pid
@@ -208,6 +451,41 @@ StandardError=append:$LOG_DIR/daphne-error.log
 Environment=PYTHONUNBUFFERED=1
 Environment=DJANGO_SETTINGS_MODULE=transtream.settings
 Environment="DJANGO_CSRF_TRUSTED_ORIGINS=${origins}"
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+# The persistent worker unit, written in the same command as the app's, because a
+# half-enabled auto-run is its own false affordance: without it, `transtream
+# enable` yields a server that comes up after every reboot with no queue consumer,
+# which is the stuck-upload state made permanent.
+#
+# NO Restart= here, unlike the app unit, and the reason is specific: the A/B
+# harness pkills `manage.py tsworker` (ab_warmup_first_take.py:609) and aborts if
+# any worker is alive at start. A respawning persistent worker would come back
+# five seconds after that pkill and make the NEXT measurement run refuse to start,
+# blaming the operator's terminal. A measurement tool and an auto-running consumer
+# are in genuine tension; the resolution is that auto-run must not fight the
+# harness, because the harness produced the numbers the README quotes.
+write_persistent_worker_unit() {
+    mkdir -p "$USER_SERVICE_DIR"
+
+    cat > "$WORKER_SERVICE_FILE" <<EOF
+[Unit]
+Description=TranStream Queue Worker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$BACKEND_DIR
+ExecStart=$VENV_DIR/bin/python manage.py tsworker --verbose
+StandardOutput=append:$WORKER_OUT_FILE
+StandardError=append:$WORKER_OUT_FILE
+Environment=PYTHONUNBUFFERED=1
+Environment=DJANGO_SETTINGS_MODULE=transtream.settings
+Environment=TS_WARMUP_MODELS=1
 
 [Install]
 WantedBy=default.target
@@ -277,6 +555,8 @@ start_daphne() {
 
         cd "$BACKEND_DIR"
 
+        # $! is the real pid only because this runs non-interactively; see the
+        # identical note in start_worker.
         if command -v setsid >/dev/null 2>&1; then
             setsid nohup "$VENV_DIR/bin/daphne" \
                 -b "$APP_HOST" \
@@ -359,17 +639,53 @@ stop_daphne() {
 }
 
 cmd_start() {
+    local with_worker="$START_WORKER"
+    local a
+    for a in "$@"; do
+        case "$a" in
+            --no-worker) with_worker=0 ;;
+            --worker)    with_worker=1 ;;
+            *) err "Unknown start flag: $a"; cmd_help; exit 1 ;;
+        esac
+    done
+
     ensure_dirs
+    require_migrations_applied
     start_redis_if_needed
     start_daphne
 
+    # Worker LAST, and its failure is a WARN, not a teardown: if Daphne is up and
+    # the worker is not, the microphone path still works. Killing a running server
+    # to protest a missing queue consumer would trade a partial failure for a
+    # total one. The final message then says which half is running.
+    local worker_ok=1
+    if [ "$with_worker" = "1" ]; then
+        if ! start_worker; then
+            worker_ok=0
+        fi
+    else
+        info "Worker skipped (--no-worker / TRANSTREAM_WORKER=0)."
+        info "Uploads will queue at 'Queued' until one is running."
+    fi
+
     echo ""
-    ok "TranStream is running."
+    if [ "$worker_ok" = "1" ] && [ "$with_worker" = "1" ]; then
+        ok "TranStream is running: app, queue worker, and Redis."
+        info "Microphone takes and file uploads both work now; no second terminal needed."
+    elif [ "$with_worker" = "1" ]; then
+        warn "TranStream is PARTIALLY running: the app is up, the worker is not."
+        warn "Microphone recording works. Uploads will sit at 'Queued (waiting for worker)'."
+        warn "Retry:   transtream stop && transtream start"
+        warn "Inspect: tail -n 40 $WORKER_OUT_FILE"
+    else
+        ok "TranStream app is running (worker deliberately not started)."
+    fi
     info "Logs: $LOG_DIR/"
 }
 
 cmd_stop() {
     stop_daphne
+    stop_worker_if_we_started
     stop_redis_if_we_started
 
     echo ""
@@ -379,7 +695,7 @@ cmd_stop() {
 cmd_restart() {
     cmd_stop
     sleep 1
-    cmd_start
+    cmd_start "$@"
 }
 
 cmd_status() {
@@ -438,6 +754,36 @@ cmd_status() {
         warn "Daphne : NOT RUNNING"
     fi
 
+    # The worker line, with its consequence spelled out rather than implied: an
+    # operator who reads "Worker: NOT RUNNING" and knows the UI looks fine is the
+    # exact person who needs to be told that uploads are the affected half.
+    local worker_running=false
+    if has_systemd_user && [ -f "$WORKER_UNIT_FILE" ]; then
+        local wunit
+        wunit=$(cat "$WORKER_UNIT_FILE" 2>/dev/null || echo "")
+        if [ -n "$wunit" ] && systemctl --user is-active --quiet "$wunit"; then
+            worker_running=true
+            ok "Worker : RUNNING as systemd user unit $wunit"
+        fi
+    fi
+    if has_systemd_user && systemctl --user is-active --quiet "$WORKER_SERVICE_NAME" 2>/dev/null; then
+        worker_running=true
+        ok "Worker : RUNNING as persistent systemd service $WORKER_SERVICE_NAME"
+    fi
+    if [ -f "$WORKER_PID_FILE" ] && kill -0 "$(cat "$WORKER_PID_FILE")" 2>/dev/null; then
+        worker_running=true
+        ok "Worker : RUNNING as fallback process (PID: $(cat "$WORKER_PID_FILE"))"
+    fi
+    if [ "$worker_running" = false ] && worker_foreign_running; then
+        worker_running=true
+        ok "Worker : RUNNING, but not started by this script (foreign process - left alone)"
+        pgrep -af "manage.py tsworker" | sed 's/^/    /' || true
+    fi
+    if [ "$worker_running" = false ]; then
+        warn "Worker : NOT RUNNING - uploads will queue at 'Queued' and never process"
+        warn "         (microphone takes are unaffected)"
+    fi
+
     echo ""
     info "Port $port binding:"
     ss -ltnp 2>/dev/null | grep ":${port} " || echo "  (none)"
@@ -448,9 +794,17 @@ cmd_status() {
     echo ""
     if has_systemd_user; then
         if systemctl --user is-enabled "$SERVICE_NAME" 2>/dev/null; then
-            ok "Auto-run persistent systemd service: ENABLED"
+            ok "Auto-run app service    : ENABLED"
         else
-            info "Auto-run persistent systemd service: DISABLED (default)"
+            info "Auto-run app service    : DISABLED (default)"
+        fi
+        # The two units can disagree, and status must say so: a worker-less
+        # auto-run is the stuck-upload state, permanently, and silently across a
+        # reboot - which is the failure mode this whole change exists to remove.
+        if systemctl --user is-enabled "$WORKER_SERVICE_NAME" 2>/dev/null; then
+            ok "Auto-run worker service : ENABLED"
+        else
+            warn "Auto-run worker service : DISABLED - after a reboot, uploads will stall"
         fi
     else
         info "systemd user session: NOT AVAILABLE"
@@ -485,10 +839,28 @@ cmd_logs() {
         return 0
     fi
 
-    touch "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
+    # `transtream logs worker` follows only the worker, so an operator debugging a
+    # stuck upload is not scrolling past Daphne traffic.
+    if [ "${1:-}" = "worker" ]; then
+        if has_systemd_user && [ -f "$WORKER_UNIT_FILE" ]; then
+            local wunit
+            wunit=$(cat "$WORKER_UNIT_FILE" 2>/dev/null || echo "")
+            if [ -n "$wunit" ] && systemctl --user is-active --quiet "$wunit"; then
+                info "Following systemd journal for worker unit: $wunit"
+                journalctl --user -u "$wunit" -f
+                return 0
+            fi
+        fi
+        touch "$WORKER_OUT_FILE" "$LOG_DIR/worker.log"
+        info "Tailing $WORKER_OUT_FILE and $LOG_DIR/worker.log (Ctrl+C to stop)..."
+        tail -f "$WORKER_OUT_FILE" "$LOG_DIR/worker.log"
+        return 0
+    fi
+
+    touch "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log" "$WORKER_OUT_FILE"
 
     info "Tailing log files (Ctrl+C to stop)..."
-    tail -f "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log"
+    tail -f "$LOG_DIR/daphne.log" "$LOG_DIR/redis.log" "$WORKER_OUT_FILE"
 }
 
 cmd_enable() {
@@ -512,20 +884,22 @@ cmd_enable() {
     fi
 
     write_persistent_unit "$port"
+    write_persistent_worker_unit
 
     systemctl --user daemon-reload
     systemctl --user enable "$SERVICE_NAME"
+    systemctl --user enable "$WORKER_SERVICE_NAME"
 
-    ok "Auto-run ENABLED on port $port."
-    info "TranStream will start on login."
-    info "Start now manually: systemctl --user start $SERVICE_NAME"
+    ok "Auto-run ENABLED on port $port (app + worker)."
+    info "TranStream and its queue worker will start on login."
+    info "Start now manually: systemctl --user start $SERVICE_NAME $WORKER_SERVICE_NAME"
     info "Disable later:      transtream disable"
 }
 
 cmd_disable() {
     if ! has_systemd_user; then
         warn "systemd user session is not available."
-        rm -f "$USER_SERVICE_FILE"
+        rm -f "$USER_SERVICE_FILE" "$WORKER_SERVICE_FILE"
         ok "Auto-run DISABLED."
         return 0
     fi
@@ -534,7 +908,9 @@ cmd_disable() {
 
     systemctl --user disable "$SERVICE_NAME" 2>/dev/null || true
     systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$USER_SERVICE_FILE"
+    systemctl --user disable "$WORKER_SERVICE_NAME" 2>/dev/null || true
+    systemctl --user stop "$WORKER_SERVICE_NAME" 2>/dev/null || true
+    rm -f "$USER_SERVICE_FILE" "$WORKER_SERVICE_FILE"
     systemctl --user daemon-reload
 
     ok "Auto-run DISABLED. TranStream will NOT start automatically."
@@ -548,14 +924,15 @@ Usage:
   transtream <command>
 
 Commands:
-  start       Find free port → start Redis if needed → start Daphne
-  stop        Stop Daphne and Redis only if this script started them
-  restart     Stop → start
-  status      Show port, process/unit state, bindings, auto-run state
-  logs        Tail Daphne logs
-  enable      Install systemd user service for optional auto-run
-  disable     Remove systemd user service
-  help        Show this help message
+  start                 Redis if needed -> Daphne -> the queue worker
+  start --no-worker     App only; uploads queue until a worker runs
+  stop                  Stop Daphne, worker and Redis - only what it started
+  restart               Stop -> start (flags pass through)
+  status                Port, process/unit state, bindings, auto-run, worker
+  logs [worker]         Tail app+redis+worker, or just the worker
+  enable                Install BOTH systemd user services (app + worker)
+  disable               Remove both
+  help                  Show this help message
 
 Port behavior:
   • Preferred port: $PREFERRED_PORT
@@ -572,15 +949,29 @@ Redis behavior:
   • Starts local Redis only if not already running.
   • Stops Redis only if this script started it.
 
+Worker behavior:
+  • Started by default; uploads are not processed without one.
+  • Opt out: transtream start --no-worker, or TRANSTREAM_WORKER=0 transtream start
+  • TS_WARMUP_MODELS=1 is set on the launch line, never in .env, because
+    AppConfig.ready() also runs in Daphne and in one-off commands.
+  • Stops only if this script started it; a foreign worker is reported, not killed.
+  • The A/B harness (scripts/ab_warmup_first_take.py) aborts if any worker is
+    alive at start and pkills one at the end - run 'transtream stop' first, or
+    use --no-worker.
+
 Process behavior:
   • Uses systemd user transient service when available.
   • Falls back to setsid/nohup when systemd user is unavailable.
   • NEVER kills a process it did not start.
+  • Refuses to start on an unmigrated database, and prints the migrate command.
+  • The migration probe is scripts/check_migrations.py - a file, not an inline
+    heredoc, so it can be compiled and self-tested.
 
 Auto-run:
   • Disabled by default.
-  • Use: transtream enable
-  • Use: transtream disable
+  • enable installs BOTH the app and the worker unit; a worker-less auto-run
+    would leave uploads stalled after every reboot.
+  • Use: transtream enable / transtream disable
 
 Project dir : $PROJECT_DIR
 Script path : $SCRIPT_PATH
@@ -589,11 +980,11 @@ EOF
 }
 
 case "${1:-help}" in
-    start)   cmd_start ;;
+    start)   shift; cmd_start "$@" ;;
     stop)    cmd_stop ;;
-    restart) cmd_restart ;;
+    restart) shift; cmd_restart "$@" ;;
     status)  cmd_status ;;
-    logs)    cmd_logs ;;
+    logs)    shift; cmd_logs "$@" ;;
     enable)  cmd_enable ;;
     disable) cmd_disable ;;
     help|--help|-h) cmd_help ;;
