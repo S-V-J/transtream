@@ -636,9 +636,19 @@ def main() -> int:
           f" | saving {round(median(cold_t1) - median(warm_t1), 3)} s"
           f" | POLL-UNMATCHED cold t1 {[r['take1']['polls'] for r in arms['cold']]}"
           f" vs warm t1 {[r['take1']['polls'] for r in arms['warm']]}")
+    # The outlier note is conditional on an OBSERVED >2 s cold-t1 spread - the
+    # 04:50 signature - so it is a live detector rather than a stale assertion about
+    # a run that is no longer here. Built as a plain variable, not as a conditional
+    # inside an f-string replacement field: nested quotes inside braces are the
+    # escape-and-brace class that has killed eight patches, and a name costs nothing.
+    # n comes from len(cold_t1), which this print already uses, rather than
+    # len(cold_res), whose definition point is not established above this line.
+    _outlier = (" plus one cold-t1 outlier over 2 s (a Hub round trip)"
+                if max(cold_t1) - min(cold_t1) > 2.0 else "")
     print(f"  spread: cold {round(max(cold_t1) - min(cold_t1), 3)} s vs "
           f"warm {round(max(warm_t1) - min(warm_t1), 3)} s - the variance collapse "
-          f"is the durable claim; the median saving rests on n=2 and one network event")
+          f"is the durable claim; the median saving rests on n={len(cold_t1)}"
+          f"{_outlier}")
     # ── the wall comparison, stratified by poll count ───────────────────────
     # This line used to compare median(warm take1) against median(cold take2)
     # and label the result 'first take costs what the second take costs'. That claim holds only when both
@@ -736,10 +746,11 @@ def main() -> int:
     print("    bias runs FOR the effect: a null result is the safe one, a positive one")
     print("    is inflated by position-1 cost - read the per-engine worker clock, and")
     print("    trust the clean rep (position 4) over the first.")
-    print("  * MPS memory throttling varied 39-46% across this session's runs; the")
+    print("  * MPS memory throttling varies run to run; read the [MPS-ADMIT] lines in")
+    print("    your terminal for THIS run's state. The")
     print("    within-lifetime design cancels it, but only if both takes of a lifetime")
     print("    fall inside the same throttle state (~10 s apart, so mostly yes).")
-    print("  * the slice is silent on this take (first speech at 1.040 s), so a")
+    print("  * on the reference take the slice is silent (first speech at 1.040 s there), so a")
     print("    near-zero effectiveness is about the SLICE, not about warmup in general.")
     return 1 if leaked else 0
 
