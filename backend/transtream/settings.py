@@ -202,11 +202,27 @@ WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")
 # larger model that does solve it costs decode time and can lose words the
 # smaller one had (measured: base lost "azure" while gaining "voip").
 #
-# NOT INDEPENDENT OF WHISPER_LANGUAGE. This is text in the decoder context, and
-# text carries language signal, so with the language pin unset an English prompt
-# can pull language detection toward English - which would regress exactly the
-# auto-detect deployments the empty pin exists to serve. Set WHISPER_LANGUAGE
-# whenever you set a prompt.
+# The same measurement found the cost, and it is not hypothetical. On a 41 s
+# take whose speaker identifies himself as "Saturn" and says nothing from this
+# list, the prompt replaced that self-identification with "Siddhant". On a 29 s
+# Hindi take that detection misreads as 'id', the prompt wrote "Siddhant Kumar"
+# twice into a sentence containing no such words. So this knob is a per-speaker
+# vocabulary, not a global one: set deployment-wide, it fixes one take by
+# corrupting others, and it belongs where the take's own vocabulary warrants it.
+# It is also why the nine-term list cannot detect this - the prompt's own proper
+# noun is outside the list by construction.
+#
+# NOT INDEPENDENT OF WHISPER_LANGUAGE - but the arrow runs the other way.
+# Detection is a separate method over pre-computed mel features and takes no
+# prompt parameter at all, so a prompt cannot choose the language. Measured on
+# one take that detects as 'id' at 0.11, with no prompt, an English prompt and a
+# Devanagari prompt: the detected language and its probability were
+# byte-identical across all three arms. What detection constrains is the prompt -
+# with 'id' chosen, a Devanagari prompt produced no Devanagari at all.
+# So pin the language because the prompt cannot do it for you, not because the
+# prompt would break it.
+# The mechanism is a property of the installed library version, so a version
+# bump is the moment to re-check this rather than to trust it.
 #
 # Keep it short. The prompt occupies part of the decoder's finite context, so a
 # long one costs room the audio could have used; the budget itself is not
