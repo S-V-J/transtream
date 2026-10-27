@@ -177,21 +177,20 @@ def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = 
     # auto-detect default (faster-whisper 1.2.1 signature, read not recalled).
     lang = language if language is not None else (
         str(getattr(settings, "WHISPER_LANGUAGE", "")).strip() or None)
-    # Three states, and the argument path is deliberately NOT collapsed the way
-    # the setting path is:
-    #   None -> consult the setting (this is what every existing caller passes)
-    #   ""   -> deliberate override: no prompt for THIS call, ignore the setting
-    #   text -> use it
-    # The setting's own "" and any whitespace-only value collapse to None by
-    # .strip() or None, so an unset knob means "no prompt" rather than "a prompt
-    # consisting of the empty string". The explicit-argument "" is left alone
-    # because the library reads it as no prompt too - verified by reading
-    # WhisperModel.transcribe, not assumed - so both routes land on the same
-    # behaviour by different paths. This differs from language above on purpose:
-    # there, an empty string would be "the language literally called empty", so
-    # collapsing it matters; here it is inert, and preserving it as a distinct
-    # value is what lets a future per-request caller opt OUT of a deployment
-    # prompt without touching the knob.
+    # Two states, and the collapse is applied to the RESOLVED value rather than
+    # to the setting alone:
+    #   None or ""  -> no prompt, which is the library's own no-prompt behaviour
+    #   text        -> use it
+    # The setting's "" and any whitespace-only value collapse via .strip() or
+    # None, and so does an explicit "" argument - on purpose. Reading
+    # WhisperModel.transcribe could not settle how the library treats an empty
+    # string: it contains no guard on the knob. It forwards the value to the
+    # internal implementation, which was not read. Rather than guess, the code
+    # avoids the unverified path entirely, so the question is moot rather than
+    # merely unobserved. This is also where the knob differs from
+    # WHISPER_LANGUAGE above, whose empty string would be
+    # "the language literally called empty" and is collapsed on the setting
+    # path only.
     prompt = (initial_prompt if initial_prompt is not None else
               str(getattr(settings, "WHISPER_INITIAL_PROMPT", ""))).strip() or None
 
