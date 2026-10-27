@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Apply anchored edits to a file with the discipline this project has paid seven
+Apply anchored edits to a file with the discipline this project has paid eight
 vehicle failures to learn, so the caller supplies INTENT AS DATA and never
 re-types the control flow that keeps breaking.
 
-WHY THIS EXISTS AS A MODULE. Seven times the edits were RIGHT and the VEHICLE was
+WHY THIS EXISTS AS A MODULE. Eight times the edits were RIGHT and the VEHICLE was
 wrong: a `);` that killed the TAINT heredoc; an implicit-concatenation boundary
 needle that killed METRIC; a stale anchor that killed METRIC2 against a file that
 had moved in a three-day gap; an unmatched `)` in the EDITS tuple that killed
@@ -13,13 +13,25 @@ wrap class - which died on TWO escaping errors in its own string-surgery heredoc
 (under-escaped `\\n` became a real newline in the emitted source and broke
 ast.parse; over-escaped `\\\\s+` emitted a regex matching a literal backslash-then-s,
 so the wrap detector would have been dead even had it parsed); P2's caller carrying
-FOUR data defects while the engine surfaced ONE (short-circuit masking); and V3 -
-a heredoc doing string surgery on THIS file, which the engine correctly refused
+FOUR data defects while the engine surfaced ONE (short-circuit masking); V3 - a
+heredoc doing string surgery on THIS file, which the engine correctly refused
 because its retired-fragment assertion was self-contradictory with v3's own design
 (v3 keeps the raw global line in an else branch and only ADDS the code branch, so
-the "retired" fragment legitimately survives). The seventh is the lesson turning on
-itself: the tool that forbids hand-rolled string surgery must not itself be patched
-by hand-rolled string surgery. So v3 ships whole via `cat`.
+the "retired" fragment legitimately survives); and the eighth, which is this
+engine's own blind spot rather than a caller's - lint() on an HTML file died at
+14:48:05 inside _collect -> segments_and_values -> ast.parse, raising
+`SyntaxError: invalid character '📂' (U+1F4C2)` PAST the caller's except PatchError,
+as a raw traceback. The file was not written (invariant 4 held under the crash),
+but the engine could not name its own limit: it parses Python, unconditionally,
+whatever the file is, and its thirteen-axis selftest never once handed it anything
+else. So the long-standing note that this tool "cannot touch Markdown or dotenv"
+was right about the symptom and wrong about the cause - the cause is one
+unconditional line, and the fix is not a raw mode but a declaration.
+
+The eighth is the lesson turning on itself twice over: the tool that forbids
+hand-rolled string surgery must not itself be patched by hand-rolled string
+surgery, and the tool whose whole claim is "shown stopping itself on every axis"
+had an axis universe that excluded the input class that broke it.
 
 THE MECHANISM LESSON, because it is the whole point of shipping via `cat`.
 `cat > file <<'DELIM'` passes bytes VERBATIM: there is no outer Python, so a `\\n`
@@ -27,10 +39,11 @@ written in the heredoc is a `\\n` in the file and a `\\s+` is a `\\s+`. String
 surgery (`python - <<'X'` doing str.replace) must instead emit source text THROUGH
 a Python literal, which doubles every backslash and eats every `\\n` - and that
 escape burden is what killed PK2, TAINT and R2PATCH, and what made V3 a heredoc on
-the patcher. So: `cat` for whole files (5-for-5 this session: gate, pre-flight,
-harness, patchkit v1, patchkit v2); this tested engine plus declarative data plus
-collect-all lint for edits (0-for-7 for hand-rolled surgery). Never hand-count
-escapes in a replacement string - including when the file being replaced is this one.
+the patcher. So: `cat` for whole files (6-for-6 this session: gate, pre-flight,
+harness, patchkit v1, patchkit v2, patchkit v3); this tested engine plus
+declarative data plus collect-all lint for edits (0-for-7 for hand-rolled
+surgery). Never hand-count escapes in a replacement string - including when the
+file being replaced is this one.
 
 THE FIVE INVARIANTS, each enforced in code rather than in a comment:
 
@@ -72,24 +85,38 @@ THE FIVE INVARIANTS, each enforced in code rather than in a comment:
      body, so the raw count was 2. v1's short-circuit hid that as D-c; v3 makes it a
      KIND. A global may be ("needle", want) for a raw count, or ("needle", want,
      "code") to count against code_only() - the SAME implementation the pre-flight
-     and the gate use, imported from guard_log_append_only, so "appears once IN CODE"
-     means one thing in every textual check in the repo. Hand-narrowing a needle to
-     a code-only form ("return runnable_jobs().count()") works for one global and is
-     the hand-counting that produced D-b/c/d; the kind removes it for the debt files,
-     whose docstrings quote the very symbols their edits assert.
+     and the gate use, imported from guard_log_append_only, so "appears once IN
+     CODE" means one thing in every textual check in the repo. Hand-narrowing a
+     needle to a code-only form ("return runnable_jobs().count()") works for one
+     global and is the hand-counting that produced D-b/c/d; the kind removes it for
+     the debt files, whose docstrings quote the very symbols their edits assert.
 
   4. WRITE LAST, AND COLLECT ALL BEFORE WRITING. The new text is built in memory,
      every lit/src/retired/global assertion is run against it, ast.parse() is run
-     against it, and only then is the file written. A failing assertion leaves the
-     file byte-identical. And lint() returns EVERY violation across EVERY edit and
-     EVERY global in one pass, no short-circuit, because "one bug hides another" has
-     now cost four extra cycles in this arc (the 400 masking the revoke route,
-     check-4 masking check-5, D-a masking D-b/c/d, and V3's bad retired-fragment
-     masking nothing only because it was the sole defect). A caller runs lint first;
-     an empty list is the only thing that licenses apply_file.
+     against it when the source is Python, and only then is the file written. A
+     failing assertion leaves the file byte-identical - and that held even when the
+     parse itself raised, which is why the 14:48:05 crash wrote nothing. And lint()
+     returns EVERY violation across EVERY edit and EVERY global in one pass, no
+     short-circuit, because "one bug hides another" has now cost four extra cycles
+     in this arc (the 400 masking the revoke route, check-4 masking check-5, D-a
+     masking D-b/c/d, and V3's bad retired-fragment masking nothing only because it
+     was the sole defect). A caller runs lint first; an empty list is the only thing
+     that licenses apply_file.
+
+     THE PYTHON DECLARATION, and it is part of this invariant rather than a new one.
+     ast.parse() is a Python-only operation, and the lit diagnostics are built on
+     it, so the engine cannot know a file's language by looking at a path. The
+     caller therefore declares it: python=True (the default, so every existing
+     caller is unaffected) parses and keeps the brace protection; python=False skips
+     the parse entirely, which is what a text anchor plus raw-count globals needs,
+     because neither requires a parser. A lit needle requested under python=False
+     is misuse and is named as such. A non-Python file submitted under the default
+     python=True is the 14:48:05 case and is now NAMED rather than raised, because
+     forgetting to declare is the likely human error and it must not produce a
+     traceback that escapes the caller's except PatchError.
 
   5. OBSERVED REFUSING. --selftest feeds the engine a synthetic source and proves
-     it refuses on thirteen checks before it is allowed near a real file: acceptance;
+     it refuses on sixteen checks before it is allowed near a real file: acceptance;
      absent text anchor; ambiguous ast anchor; concatenation BOUNDARY needle;
      WRAPPED needle named as a wrap, plus a contiguous-needle control in the SAME
      wrapped source; overlapping edits refused; an ast edit placed AFTER a
@@ -97,15 +124,22 @@ THE FIVE INVARIANTS, each enforced in code rather than in a comment:
      test); a retired needle containing a newline rejected; a retired string still
      present rejected; lint collecting MORE THAN ONE violation in a single pass; a
      code= global that PASSES where the same raw global REFUSES on prose (the
-     runnable_jobs class, on a synthetic); and a failing global leaving a real file
-     byte-identical. A check that cannot stop you is a report; this one is shown
-     stopping itself, on every axis, including the ones that bit it and the one that
-     bit the attempt to patch it.
+     runnable_jobs class, on a synthetic); a failing global leaving a real file
+     byte-identical; a NON-PYTHON source with a text edit and raw globals applying
+     cleanly with no parse attempted (python=False); a lit needle on that same
+     source being NAMED as misuse; and - the 14:48:05 reproduction, on the DEFAULT
+     path - a non-Python source under python=True being NAMED rather than raising
+     SyntaxError out of lint(). A check that cannot stop you is a report; this one
+     is shown stopping itself, on every axis, including the ones that bit it, the
+     one that bit the attempt to patch it, and the one that bit the engine itself.
 
 SCOPE, stated so it is not oversold: this is anchored EDIT application, not a merge
 tool, not a semantic rewriter, and not a dataflow analyser. It will not fix a file
 whose INTENT has drifted (that is what the read-only reconciliation step is for); it
 refuses when an anchor does not match exactly once, and that refusal is the feature.
+It parses Python when python=True and does not parse at all when python=False; it
+does not guess a file's language from its name, and it has no opinion about
+languages it cannot parse.
 """
 import argparse
 import ast
@@ -138,6 +172,9 @@ def segments_and_values(src: str):
     difference between the two lists is what distinguishes 'the needle is absent'
     from 'the needle exists only after implicit concatenation folded it' from 'the
     needle is there but the file WRAPS it across a line break inside one literal'.
+
+    PYTHON-ONLY BY CONSTRUCTION: it calls ast.parse. Callers that are not editing
+    Python pass python=False and never reach here - see invariant 4.
     """
     tree = ast.parse(src)
     segs, vals = [], []
@@ -346,18 +383,55 @@ def _check_retired(new: str, edit: dict) -> list:
     return out
 
 
-def _collect(src: str, edits: tuple, global_posts: tuple) -> list:
+def _collect(src: str, edits: tuple, global_posts: tuple, python: bool = True) -> list:
     """The single source of truth for 'is this edit set safe to apply'. Returns
     every violation, never short-circuits. lint() and apply_text() both call it,
-    so the preview and the commit cannot disagree."""
+    so the preview and the commit cannot disagree.
+
+    THE python FLAG, and why it is a parameter rather than a guess from the path.
+    segments_and_values() parses the spliced text as PYTHON, because invariant 3's
+    lit diagnostics need the per-literal source segments and folded values. That is
+    correct for .py files and it was a CRASH for everything else until 14:48:05,
+    when an HTML edit died there with `SyntaxError: invalid character '📂'`, out of
+    lint(), past the caller's except PatchError. A text anchor and a raw-count
+    global need no parser at all - so the parser is now only run when the caller
+    says the source is Python, and a lit needle requested without that promise is
+    named as misuse instead of raising.
+    """
     try:
         new = _splice_all(src, edits)
     except PatchError as exc:
         return [str(exc)]
-    segs, vals = segments_and_values(new)
     errs = []
+    wants_lit = any(e.get("lit") for e in edits)
+    if python:
+        # The brace protection is worth keeping for real Python. But a caller that
+        # forgot to declare a non-Python file must get a sentence, not a traceback -
+        # which is exactly what escaped the caller's except PatchError at 14:48:05,
+        # and it is the DEFAULT path, so it is the case most likely to recur.
+        try:
+            segs, vals = segments_and_values(new)
+        except SyntaxError as exc:
+            return [
+                "the spliced text does not parse as Python "
+                f"({exc.msg} at line {exc.lineno}) - if this file is not Python, "
+                "pass python=False; a text anchor and raw-count globals need no "
+                "parser. If it IS Python, the replacement has a syntax error and "
+                "must be fixed before anything is written."]
+        for e in edits:
+            errs.extend(_check_lit(new, e, segs, vals))
+    elif wants_lit:
+        for e in edits:
+            for frag in e.get("lit", ()):
+                errs.append(
+                    f"{e['label']}: lit {frag[:48]!r} requested with python=False - "
+                    f"the literal-boundary and wrap diagnostics cannot run on a "
+                    f"non-Python source. Use a raw-count global instead.")
+        if errs:
+            return errs
+    # src_assert and retired are raw counts on the text; they need no parser and
+    # run identically under both declarations, which is why they are outside it.
     for e in edits:
-        errs.extend(_check_lit(new, e, segs, vals))
         errs.extend(_check_src(new, e))
         errs.extend(_check_retired(new, e))
     for g in global_posts:
@@ -376,42 +450,49 @@ def _collect(src: str, edits: tuple, global_posts: tuple) -> list:
     return errs
 
 
-def lint(src: str, edits: tuple, global_posts: tuple) -> list:
+def lint(src: str, edits: tuple, global_posts: tuple, python: bool = True) -> list:
     """Collect EVERY violation across every edit and every global, without raising
     and without writing. A caller runs this first so that a multi-edit change
     surfaces all its data defects in ONE pass instead of one per round trip - the
     'one bug hides another' pattern has now cost four extra cycles in this arc.
-    Empty list == safe to apply."""
-    return _collect(src, edits, global_posts)
+    Empty list == safe to apply.
+
+    Callers editing non-Python (HTML, Markdown, dotenv) pass python=False. See
+    invariant 4 for why the engine will not infer it from the filename."""
+    return _collect(src, edits, global_posts, python=python)
 
 
-def apply_text(src: str, edits: tuple, global_posts: tuple) -> str:
-    """Build the new text, run EVERY assertion, parse it, return it. No file is
-    touched here - this is the pure half, so --selftest can exercise the refusal
-    paths on strings without a filesystem. Raises a composite listing ALL
-    violations, never just the first."""
-    errs = _collect(src, edits, global_posts)
+def apply_text(src: str, edits: tuple, global_posts: tuple,
+               python: bool = True) -> str:
+    """Build the new text, run EVERY assertion, parse it when it is Python, return
+    it. No file is touched here - this is the pure half, so --selftest can exercise
+    the refusal paths on strings without a filesystem. Raises a composite listing
+    ALL violations, never just the first."""
+    errs = _collect(src, edits, global_posts, python=python)
     if errs:
         raise PatchError(
             "EDIT VALIDATION FAILED, all violations listed:\n  - "
             + "\n  - ".join(errs))
     new = _splice_all(src, edits)   # re-splice for the return value; _collect proved it clean
-    ast.parse(new)                  # a bad brace dies here, not on disk
+    if python:
+        ast.parse(new)              # a bad brace dies here, not on disk
     return new
 
 
 def apply_file(path: pathlib.Path, edits: tuple, global_posts: tuple,
-               dry_run: bool = False) -> list:
+               dry_run: bool = False, python: bool = True) -> list:
     """Read, apply_text, and - only if every assertion passed - write. Returns a
     human-readable report. dry_run computes and validates without writing, so the
     caller can preview a multi-edit change before committing to it."""
     src = path.read_text()
-    new = apply_text(src, edits, global_posts)
+    new = apply_text(src, edits, global_posts, python=python)
     report = [f"  {e['label']}: {'ast' if e.get('kind')=='ast' else 'text'} anchor ok"
               for e in edits]
     report.append(f"  {len(global_posts)} global post-conditions hold")
     report.append(f"  delta: {len(src)} -> {len(new)} bytes "
                   f"({len(src.splitlines())} -> {len(new.splitlines())} lines)")
+    if not python:
+        report.append("  (python=False: no AST parse attempted - non-Python source)")
     if dry_run:
         report.append("  DRY RUN - nothing written")
         return report
@@ -420,12 +501,13 @@ def apply_file(path: pathlib.Path, edits: tuple, global_posts: tuple,
     return report
 
 
-# ─── invariant 5: observed refusing, on thirteen axes ───────────────────────
+# ─── invariant 5: observed refusing, on sixteen axes ────────────────────────
 
 def selftest() -> int:
-    """Thirteen checks, each naming the class it exercises, so a future regression
+    """Sixteen checks, each naming the class it exercises, so a future regression
     that blinds one axis says which. Several exist because that exact failure
-    happened to this engine or to a caller of it."""
+    happened to this engine or to a caller of it - including axes 14 to 16, which
+    exist because the failure happened to the engine itself."""
     SRC = ('"""doc"""\n'
            'results = {}\n'
            'def run():\n'
@@ -656,7 +738,80 @@ def selftest() -> int:
     finally:
         os.unlink(tmp)
 
-    print(f"  selftest: {cases}/13 checks exercised, {fails} failure(s)")
+    # 14. A NON-PYTHON SOURCE with a text edit and raw-count globals must apply.
+    #     This is the 14:48:05 case, and it is the reason the python flag exists:
+    #     an HTML edit died in _collect -> segments_and_values -> ast.parse with
+    #     `SyntaxError: invalid character '📂' (U+1F4C2)`, out of lint(), past the
+    #     caller's except PatchError, as a raw traceback. The file was not written
+    #     (invariant 4 held under the crash) but the engine could not say why. A
+    #     text anchor and a raw count need no parser, so declaring python=False
+    #     must let them through - and must not lose a byte of the rest of the file.
+    HTML = ('<div id="a">\n'
+            '  <span class="t" x-text="seg.text"></span>\n'
+            '</div>\n'
+            '\U0001f4c2 Open File System\n')
+    try:
+        out14 = apply_text(HTML, (dict(label="html", kind="text",
+                                       old='  <span class="t" x-text="seg.text"></span>',
+                                       new='  <span class="t" x-text="seg.text"\n'
+                                           '        :class="on ? \'big\' : \'\'"></span>',
+                                       lit=(), src_assert=(), retired=()),),
+                           ((':class="on ?', 1), ('x-text="seg.text"', 1)),
+                           python=False)
+        if ':class="on ?' in out14 and '\U0001f4c2' in out14 and '<div id="a">' in out14:
+            cases += 1
+            print("  [14] non-Python + text edit   -> applied, no parse attempted  OK")
+        else:
+            fails += 1
+            print(f"  [14] non-Python + text edit   -> LOST CONTENT: {out14!r}")
+    except PatchError as exc:
+        fails += 1
+        print(f"  [14] non-Python + text edit   -> REFUSED WRONGLY: {exc}")
+    except SyntaxError as exc:
+        fails += 1
+        print(f"  [14] non-Python + text edit   -> TRACEBACK, not a refusal: {exc}")
+
+    # 15. A lit needle requested under python=False must be NAMED as misuse, not
+    #     raised. The caller declared the source is not Python and then asked for a
+    #     diagnostic that can only run on Python; that is a contradiction in the
+    #     caller's data, and contradictions get a sentence.
+    try:
+        apply_text(HTML, (dict(label="misuse", kind="text",
+                               old='<div id="a">', new='<div id="a">',
+                               lit=("seg.text",), src_assert=(), retired=()),),
+                   (), python=False)
+        fails += 1
+        print("  [15] lit on non-Python        -> APPLIED (must refuse)")
+    except PatchError as exc:
+        if "python=False" in str(exc):
+            cases += 1
+            print("  [15] lit on non-Python        -> refused, named  OK")
+        else:
+            fails += 1
+            print(f"  [15] lit on non-Python        -> refused but MISNAMED: {exc}")
+    except SyntaxError as exc:
+        fails += 1
+        print(f"  [15] lit on non-Python        -> TRACEBACK, not a refusal: {exc}")
+
+    # 16. THE ACTUAL 14:48:05 REPRODUCTION, ON THE DEFAULT PATH. python=True on a
+    #     non-Python source must refuse with a named sentence rather than raise
+    #     SyntaxError out of lint(). This is the most important of the three new
+    #     axes, because python=True is the default: a caller that FORGETS to declare
+    #     is the likely human error, and it must produce a sentence, not a traceback
+    #     that escapes the caller's except PatchError and leaves the caller guessing
+    #     whether the file was written.
+    viols16 = lint(HTML, (dict(label="forgot", kind="text",
+                               old='<div id="a">', new='<div id="b">',
+                               lit=(), src_assert=(), retired=()),), ())
+    if viols16 and any("python=False" in v for v in viols16):
+        cases += 1
+        print("  [16] undeclared non-Python    -> refused, named (no traceback)  OK")
+    else:
+        fails += 1
+        print(f"  [16] undeclared non-Python    -> {viols16!r} (must name the parse failure "
+              f"and point at python=False)")
+
+    print(f"  selftest: {cases}/16 checks exercised, {fails} failure(s)")
     if fails:
         print("SELFTEST FAIL - patchkit cannot be trusted to edit a real file")
         return 1
@@ -664,21 +819,24 @@ def selftest() -> int:
           "anchors; names BOUNDARY, WRAPPED and newline needles distinctly; splices "
           "an ast edit correctly even after a length-changing text edit (the v1 "
           "stale-span bug); lint lists every violation in one pass; a code= global "
-          "passes where the same raw global refuses on prose; and writes nothing "
-          "when a global fails. Certified on thirteen axes before it touches the "
-          "debt files.")
-    return 0
+          "passes where the same raw global refuses on prose; writes nothing when a "
+          "global fails; applies a text edit on a NON-PYTHON source under "
+          "python=False; and refuses a parse it cannot perform with a sentence "
+          "instead of a traceback, on the default path as well as the declared one. "
+          "Certified on sixteen axes before it touches the debt files.")
+    return 16 - 16  # 0 on success; the arithmetic is deliberate, not a literal
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true",
-                    help="prove the engine can refuse, on thirteen checks, before use")
+                    help="prove the engine can refuse, on sixteen checks, before use")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
     print("patchkit is a library; call lint() then apply_file() from a caller that "
-          "supplies edits as data. Run --selftest first.")
+          "supplies edits as data. Pass python=False for HTML, Markdown or dotenv. "
+          "Run --selftest first.")
     return 0
 
 
