@@ -95,9 +95,8 @@
         <button
           type="button"
           @click="nativeScript = !nativeScript"
-          disabled
-          title="Native script toggle arrives in Phase 9"
-          class="cursor-not-allowed rounded-full border border-cyan-400/20 bg-cyan-500/5 px-3 py-1 text-xs font-medium text-cyan-700"
+          title="Larger, looser rendering for reading this transcript in its own script"
+          class="cursor-pointer rounded-full border border-cyan-400/20 bg-cyan-500/5 px-3 py-1 text-xs font-medium text-cyan-700"
         >
           ✨ View Native Script
         </button>
@@ -319,7 +318,8 @@
                   <div class="flex items-start gap-2 rounded-lg border border-emerald-500/10 bg-emerald-500/5 px-3 py-2 text-sm">
                     <span class="mt-0.5 shrink-0 font-mono text-xs text-emerald-400"
                           x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                    <span class="text-slate-100" x-text="seg.text"></span>
+                    <span class="text-slate-100" x-text="seg.text"
+                          :class="nativeScript ? 'text-lg leading-relaxed' : ''"></span>
                   </div>
                 </template>
               </div>
@@ -519,7 +519,8 @@
               <div class="flex items-start gap-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 px-3 py-2 text-sm">
                 <span class="mt-0.5 shrink-0 font-mono text-xs text-cyan-400"
                       x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                <span class="text-slate-100" x-text="seg.text"></span>
+                <span class="text-slate-100" x-text="seg.text"
+                      :class="nativeScript ? 'text-lg leading-relaxed' : ''"></span>
               </div>
             </template>
           </div>
