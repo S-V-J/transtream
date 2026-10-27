@@ -32,7 +32,9 @@ WHY IT CALLS THE PROJECT'S OWN FUNCTION. Reimplementing the decode call would
 mean copying beam_size, vad_filter, condition_on_previous_text and friends from
 a reading of the source - and a copy that drifts measures something other than
 production. Importing transcribe_audio() makes the arguments production by
-construction, so the ONLY variable between arms is the model size. The child
+construction, so the ONLY variable between arms is the model size. (--prompt,
+if given, is ONE value applied to every arm, so it varies between runs and not
+between arms - the comparability claim is unchanged.) The child
 calls fn(wav) with one positional argument, so beam_size stays at its default
 5 and language stays at None; settings.WHISPER_LANGUAGE defaults to the empty
 string that resolves to None, so the pin does not perturb the comparison. The function
@@ -109,14 +111,20 @@ def offline_flags():
     return out
 
 
-def child(argv_size, argv_wav, argv_fn):
+def child(argv_size, argv_wav, argv_fn, argv_prompt):
     """One size, one process, one decode. Prints a single JSON line on stdout."""
     import django
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "transtream.settings")
     sys.path.insert(0, str(BACKEND))
     django.setup()
     from django.conf import settings
-    setattr(settings, "WHISPER_MODEL_SIZE", argv_size)   # the only variable
+    setattr(settings, "WHISPER_MODEL_SIZE", argv_size)     # lever 1 of 2
+    # Lever 2. A plain attribute assignment after django.setup(), exactly like
+    # lever 1, so it outranks the env-derived value settings.py installed and the
+    # two levers stay orthogonal. Empty string means "no prompt" - the same
+    # identity default the production knob ships with - so a run without --prompt
+    # measures the same thing it measured before this flag existed.
+    setattr(settings, "WHISPER_INITIAL_PROMPT", argv_prompt)   # lever 2 of 2
 
     from studio import transcription_service as ts
     fn = getattr(ts, argv_fn, None)
@@ -168,10 +176,15 @@ def main():
     ap.add_argument("--fn", default="transcribe_audio", help="callable in studio.transcription_service")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--json", action="store_true", help="dump full transcripts to a file")
+    ap.add_argument("--prompt", default="",
+                    help="WHISPER_INITIAL_PROMPT to apply to EVERY arm in this run; "
+                         "empty is the production default, so arms stay comparable. "
+                         "It varies between runs, not between arms.")
     args = ap.parse_args()
 
     if args.child:
-        return child(os.environ["_CMP_SIZE"], os.environ["_CMP_WAV"], args.fn)
+        return child(os.environ["_CMP_SIZE"], os.environ["_CMP_WAV"], args.fn,
+                     os.environ.get("_CMP_PROMPT", ""))
 
     # ── parent: resolve the audio, screen the cache, then fan out ──
     wav = args.wav
@@ -208,7 +221,7 @@ def main():
                   f"Downloading is a network write and is not this script's to make.")
             rows.append((size, None, None, None, None, "SKIPPED (uncached)"))
             continue
-        env = dict(os.environ, _CMP_SIZE=size, _CMP_WAV=wav)
+        env = dict(os.environ, _CMP_SIZE=size, _CMP_WAV=wav, _CMP_PROMPT=args.prompt)
         t0 = time.monotonic()
         proc = subprocess.run([sys.executable, __file__, "--child", "--fn", args.fn],
                               env=env, capture_output=True, text=True, cwd=str(BACKEND))
@@ -229,7 +242,8 @@ def main():
         dump[size] = d
         rt = d["seconds"] / (pathlib.Path(wav).stat().st_size / 1_000_000_000 * 8)  # rough
         print(f"── {size:<8} {d['seconds']:>7.2f} s wall | lang={d['language']} "
-              f"({(d['probability'] or 0):.2f}) | {d['n_segments']} seg | {d['chars']} chars")
+              f"({(d['probability'] or 0):.2f}) | {d['n_segments']} seg | {d['chars']} chars"
+              f" | prompt={'(none)' if not args.prompt else repr(args.prompt)[:48]}")
         print(f"   targets recovered {len(t)}/{len(TARGETS)}: {', '.join(t) or '(none)'}")
         print(f"   controls intact   {len(c)}/{len(CONTROLS)}: {', '.join(c) or '(none in this audio)'}")
         missing = [w for w in TARGETS if w not in t]
