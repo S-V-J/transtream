@@ -190,6 +190,29 @@ WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 # gets wrong on code-switched audio (observed: a Hindi utterance classified 'id').
 WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "")
 
+# Fixed vocabulary to bias the decoder toward - names and domain terms that a
+# larger model still gets wrong. Empty is the library's own no-prompt behaviour,
+# so shipping this line changes nothing until someone sets a value.
+#
+# Witness for why it exists at all: on this machine the author's name arrives as
+# "Sadhan" at tiny and "Siddharth" at base, and the correct spelling is
+# "Siddhant". No size in the hub cache produces it, because no size has ever
+# been told which of the two spellings is right. That is a vocabulary problem,
+# and a prompt string solves it for free where a larger model cannot - and a
+# larger model that does solve it costs decode time and can lose words the
+# smaller one had (measured: base lost "azure" while gaining "voip").
+#
+# NOT INDEPENDENT OF WHISPER_LANGUAGE. This is text in the decoder context, and
+# text carries language signal, so with the language pin unset an English prompt
+# can pull language detection toward English - which would regress exactly the
+# auto-detect deployments the empty pin exists to serve. Set WHISPER_LANGUAGE
+# whenever you set a prompt.
+#
+# Keep it short. The prompt occupies part of the decoder's finite context, so a
+# long one costs room the audio could have used; the budget itself is not
+# measured here.
+WHISPER_INITIAL_PROMPT = os.getenv("WHISPER_INITIAL_PROMPT", "")
+
 # Frames between live-preview runs. <= 0 is the documented kill switch; the
 # service wraps this one read in try/except and falls back to 30 on a bad value,
 # so a typo here degrades to the default instead of killing the consumer.

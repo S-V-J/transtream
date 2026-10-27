@@ -126,7 +126,8 @@ def _load_pcm16k_mono(wav_path: Path) -> np.ndarray:
 
 # ─── Public API ────────────────────────────────────────────────────────────
 
-def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = None) -> dict:
+def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = None,
+                       initial_prompt: str | None = None) -> dict:
     """
     Transcribe a normalized 16 kHz mono PCM WAV.
 
@@ -139,6 +140,16 @@ def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = 
                    that pass nothing behave exactly as before. Pin it when the
                    audio language is known: detection is a guess, and on
                    code-switched speech it guesses wrong.
+        initial_prompt:
+                   fixed vocabulary to bias the decoder toward, or None to take
+                   the WHISPER_INITIAL_PROMPT setting (default "" = the library's
+                   own no-prompt behaviour). Same resolution order as language,
+                   and callers that pass nothing behave exactly as before. Use it
+                   for names and domain terms that a larger model still gets
+                   wrong; keep it short, because it occupies part of the
+                   decoder's context. It is NOT independent of language: with the
+                   pin unset, a prompt in one language can bias detection toward
+                   that language, so set WHISPER_LANGUAGE whenever you set this.
 
     Returns:
         {
@@ -166,11 +177,29 @@ def transcribe_audio(wav_path: Path, beam_size: int = 5, language: str | None = 
     # auto-detect default (faster-whisper 1.2.1 signature, read not recalled).
     lang = language if language is not None else (
         str(getattr(settings, "WHISPER_LANGUAGE", "")).strip() or None)
+    # Three states, and the argument path is deliberately NOT collapsed the way
+    # the setting path is:
+    #   None -> consult the setting (this is what every existing caller passes)
+    #   ""   -> deliberate override: no prompt for THIS call, ignore the setting
+    #   text -> use it
+    # The setting's own "" and any whitespace-only value collapse to None by
+    # .strip() or None, so an unset knob means "no prompt" rather than "a prompt
+    # consisting of the empty string". The explicit-argument "" is left alone
+    # because the library reads it as no prompt too - verified by reading
+    # WhisperModel.transcribe, not assumed - so both routes land on the same
+    # behaviour by different paths. This differs from language above on purpose:
+    # there, an empty string would be "the language literally called empty", so
+    # collapsing it matters; here it is inert, and preserving it as a distinct
+    # value is what lets a future per-request caller opt OUT of a deployment
+    # prompt without touching the knob.
+    prompt = (initial_prompt if initial_prompt is not None else
+              str(getattr(settings, "WHISPER_INITIAL_PROMPT", ""))).strip() or None
 
     try:
         segments_iter, info = model.transcribe(
             audio,                            # NOTE: array, not path
             language=lang,                    # None -> the library auto-detect
+            initial_prompt=prompt,            # None -> the library's no-prompt path
             beam_size=max(1, int(beam_size)),
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
