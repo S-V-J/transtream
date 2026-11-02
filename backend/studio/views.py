@@ -43,6 +43,9 @@ from django.views.decorators.http import require_GET, require_POST
 from studio import serializers
 from studio.models import ApiKey, Job, JobState
 from studio.upload_service import UploadValidationError, handle_upload
+from studio.translation_service import TranslationError, translate_take
+
+from studio import persistence
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +125,7 @@ def upload_view(request):
             user=request.user,
             uploaded_file=request.FILES.get("file"),
             language_hint=(request.POST.get("language") or "").strip() or None,
+            initial_prompt=(request.POST.get("initial_prompt") or "").strip() or None,
         )
     except UploadValidationError as exc:
         logger.warning("upload rejected from %s: [%s] %s",
@@ -156,6 +160,100 @@ def upload_view(request):
         },
         status=202,
     )
+
+
+# ─── Translation (Slice A / Task H) ─────────────────────────────────
+
+@login_required
+@require_POST
+def translate_take_view(request):
+    """
+    POST /studio/translate/  {"take_id": str, "target_language": str}
+
+    Sync translation of a Take's Whisper transcript into target_language.
+    Source language is the Take's detected language.
+    Returns 200 {take_id, source_language, target_language, text}.
+    """
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        body = {}
+
+    take_id = body.get("take_id")
+    target_language = body.get("target_language", "en")
+
+    if not take_id:
+        return JsonResponse({"error": "take_id is required."}, status=400)
+
+    from django.shortcuts import get_object_or_404
+    from studio.models import Take
+    try:
+        take = get_object_or_404(
+            Take, id=take_id, user=request.user
+        )
+    except (ValueError, AttributeError, TypeError):
+        return JsonResponse({"error": "Invalid take_id."}, status=400)
+
+    if take.language_hint:
+        source_lang = take.language_hint
+    elif take.language:
+        source_lang = take.language
+    else:
+        return JsonResponse(
+            {"error": "No detected language on this take yet. Transcribe first."},
+            status=409,
+        )
+
+    try:
+        result = translate_take(take, target_language)
+        persistence.save_translation(
+            take,
+            result["source_language"],
+            result["target_language"],
+            result["text"],
+        )
+        return JsonResponse({
+            "take_id": str(take.id),
+            "source_language": result["source_language"],
+            "target_language": result["target_language"],
+            "text": result["text"],
+        })
+    except TranslationError as exc:
+        logger.warning(
+            "Translation failed for Take %s: %s", take.id.hex[:8], exc
+        )
+        return JsonResponse({"error": str(exc)}, status=500)
+
+
+@login_required
+@require_GET
+def get_translation_view(request, take_id):
+    """
+    GET /studio/translate/<take_id>/?target_language=<code>
+    Returns existing translation or 404.
+    """
+    try:
+        from django.shortcuts import get_object_or_404
+        from studio.models import Take
+        take = get_object_or_404(Take, id=take_id, user=request.user)
+    except (ValueError, AttributeError, TypeError):
+        return JsonResponse({"error": "Invalid take_id."}, status=400)
+
+    target_language = request.GET.get("target_language", "en")
+    translation = persistence.get_translation(take, target_language)
+
+    if translation is None:
+        return JsonResponse(
+            {"error": f"No translation found for target '{target_language}'."},
+            status=404,
+        )
+
+    return JsonResponse({
+        "take_id": str(take.id),
+        "source_language": translation.source_language,
+        "target_language": translation.target_language,
+        "text": translation.text,
+    })
 
 
 # ─── Job polling, session-auth (Phase 7) ─────────────────────────────────

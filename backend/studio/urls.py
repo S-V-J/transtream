@@ -41,6 +41,10 @@ urlpatterns = [
         name="job_transcript",
     ),
 
+    # Translation (Slice A / Task H)
+    path("studio/translate/", views.translate_take_view, name="translate_take"),
+    path("studio/translate/<uuid:take_id>/", views.get_translation_view, name="get_translation"),
+
     # API key management (session auth, account page)
     path("account/keys/", views.api_key_list, name="api_key_list"),
     path("account/keys/generate/", views.api_key_generate, name="api_key_generate"),
