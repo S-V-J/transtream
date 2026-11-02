@@ -124,35 +124,13 @@
         </div>
 
         <!-- Hero visual - pipeline diagram -->
-        <div class="mt-16 relative overflow-hidden rounded-2xl border border-white/10 bg-slate-900/40">
-            <pre class="p-6 overflow-x-auto text-sm font-mono text-slate-400 leading-relaxed"><code>┌──────────────┐     ┌──────────────┐
-│  Microphone  │     │   Upload     │
-│ 100ms chunks │     │ multipart    │
-└──────┬───────┘     └──────┬───────┘
-       │ WebSocket          │ HTTP POST
-       ▼                    ▼
-┌─────────────────────────────────────┐
-│      AudioConsumer / upload_svc     │
-│  SessionWriter · 64KB chunks ·      │
-│  atomic rename · Take + Job(QUEUED) │
-└──────────────┬──────────────────────┘
-               │ (mic skips queue)
-               ▼
-┌─────────────────────────────────────┐
-│  ONE PIPELINE: process_take         │
-├─────────────────────────────────────┤
-│ 1. normalize  FFmpeg 16kHz mono PCM │
-│ 2. segment    Silero VAD (ONNX)     │
-│ 3. transcribe Faster-Whisper int8   │
-│ 4. translate  Nemotron / Argos      │
-│ 5. synthesize Piper TTS (8 langs)   │
-└──────────────┬──────────────────────┘
-               ▼
-┌─────────────────────────────────────┐
-│  Disk: media/recordings/<uid>/      │
-│  DB: Take, Segment, Job, ApiKey     │
-│  Redis: channel layer, rate limits  │
-└─────────────────────────────────────┘</code></pre>
+        <div class="mt-16 flex justify-center">
+            <img
+                src="{% static 'images/pipeline-diagram.png' %}"
+                alt="TranStream pipeline: mic → upload → normalize → segment → transcribe → translate → TTS → disk"
+                class="rounded-2xl border border-white/10 bg-slate-900/40 shadow-2xl max-w-3xl w-full h-auto object-contain"
+                loading="lazy"
+            />
         </div>
     </section>
 
