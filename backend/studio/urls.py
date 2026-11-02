@@ -41,6 +41,9 @@ urlpatterns = [
         name="job_transcript",
     ),
 
+    # Public pages (no auth required)
+    path("register/", views.register_view, name="register"),
+
     # Translation (Slice A / Task H)
     path("studio/translate/", views.translate_take_view, name="translate_take"),
     path("studio/translate/<uuid:take_id>/", views.get_translation_view, name="get_translation"),

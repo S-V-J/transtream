@@ -55,10 +55,47 @@ KNOWN_FORMATS = ("json", "srt", "vtt", "txt")
 # ─── Page views (UNCHANGED since Phase 1) ────────────────────────────────
 
 def root_redirect(request):
-    """/ -> /studio/ when authenticated, else /accounts/login/."""
+    """/ -> /studio/ when authenticated, else landing page."""
     if request.user.is_authenticated:
         return redirect("studio:studio")
-    return redirect("login")
+    return render(request, "landing.html", {"page": "landing"})
+
+
+def register_view(request):
+    """Public registration page."""
+    if request.user.is_authenticated:
+        return redirect("studio:studio")
+    if request.method == "POST":
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth import login as auth_login
+        from django.contrib import messages
+        username = request.POST.get("username", "").strip()
+        email = request.POST.get("email", "").strip()
+        password1 = request.POST.get("password1", "")
+        password2 = request.POST.get("password2", "")
+        User = get_user_model()
+        errors = []
+        if not username:
+            errors.append("Username is required.")
+        elif User.objects.filter(username__iexact=username).exists():
+            errors.append("Username already taken.")
+        if not email:
+            errors.append("Email is required.")
+        elif User.objects.filter(email__iexact=email).exists():
+            errors.append("Email already registered.")
+        if not password1:
+            errors.append("Password is required.")
+        elif len(password1) < 8:
+            errors.append("Password must be at least 8 characters.")
+        if password1 != password2:
+            errors.append("Passwords do not match.")
+        if not errors:
+            user = User.objects.create_user(username=username, email=email, password=password1)
+            auth_login(request, user)
+            return redirect("studio:studio")
+        for e in errors:
+            messages.error(request, e)
+    return render(request, "register.html", {"page": "register"})
 
 
 @login_required
