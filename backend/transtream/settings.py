@@ -1,7 +1,11 @@
+import json
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BASE_DIR.parent
@@ -239,6 +243,47 @@ LIVE_TRANSCRIBE_EVERY_CHUNKS = int(os.getenv("LIVE_TRANSCRIBE_EVERY_CHUNKS", "30
 # OMP_NUM_THREADS=1 before ctranslate2 is imported, and load_dotenv has populated
 # os.environ by then. Moving it onto settings would be a behaviour change dressed
 # as a tidy-up, so it stays on its existing route and the README says so.
+
+# ─── TTS (Phase 9/10) ────────────────────────────────────────────────────────
+# Piper TTS voice models directory. Models (.onnx + .json) must be downloaded
+# from https://github.com/rhasspy/piper/releases/tag/v1.2.0
+TTS_VOICE_DIR = Path(os.getenv("TTS_VOICE_DIR", str(REPO_ROOT / "media" / "tts_voices")))
+
+# ─── NVIDIA Nemotron Translation (Phase 9/10) ────────────────────────────────
+# NVIDIA Nemotron-3 Ultra API key. Set NVIDIA_API_KEY in .env to enable
+# online translation via https://integrate.api.nvidia.com/.
+# Falls back to argostranslate (offline NMT) when no API key is configured.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+NVIDIA_API_BASE = os.getenv("NVIDIA_API_BASE", "https://integrate.api.nvidia.com/v1/chat/completions")
+NVIDIA_MODEL = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
+NVIDIA_MAX_PARALLEL = int(os.getenv("NVIDIA_MAX_PARALLEL", "14"))
+NVIDIA_RPM = int(os.getenv("NVIDIA_RPM", "30"))
+
+# Voice map: language code -> Piper voice name (without .onnx extension).
+# Example: "en_US-lessac-medium", "hi_IN-aryan-medium", "es_ES-mls_10265-medium"
+# A "default" key is used as fallback for unmapped languages.
+TTS_VOICE_MAP = {
+    "en": "en_US-lessac-medium",
+    "fr": "fr_FR-siwis-medium",
+    "hi": "hi_IN-pratham-medium",
+    "es": "es_ES-davefx-medium",
+    "de": "de_DE-thorsten-medium",
+    "zh": "zh_CN-huayan-medium",
+    "ja": "ja_JP-hi_fi_captain-medium",
+    "ar": "ar_JO-kareem-medium",
+    "default": "en_US-lessac-medium",
+}
+# Can be overridden via .env as JSON: TTS_VOICE_MAP='{"en":"en_US-lessac-medium","hi":"hi_IN-aryan-medium"}'
+_env_voice_map = os.getenv("TTS_VOICE_MAP")
+if _env_voice_map:
+    try:
+        import json
+        TTS_VOICE_MAP.update(json.loads(_env_voice_map))
+    except Exception as exc:
+        logger.warning("Failed to parse TTS_VOICE_MAP JSON: %s", exc)
+
+# Inter-segment silence padding (ms) for TTS streaming
+TTS_SILENCE_MS = int(os.getenv("TTS_SILENCE_MS", "100"))
 
 # ─── Upload ingest + public API (Phases 7/8) ─────────────────────────────────
 # Both names were advertised in .env.example from Phase 7 but never read here,
