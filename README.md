@@ -279,8 +279,8 @@ Per key, per minute, there's one Redis key, `ratelimit:{fingerprint}:{unix_minut
 | Store | SQLite (`backend/db.sqlite3`), the filesystem under `media/`, Redis 8.1.0 (channel layer, limiter and throttle) |
 | Frontend | Alpine.js, Tailwind CSS, HTMX, PWA *(planned)* |
 | Runtime | Python 3.14, WSL2 / Ubuntu, systemd user units via the `transtream` CLI |
-| Translation *(planned)* | Argos Translate (offline NMT) |
-| TTS *(planned)* | Piper (local neural voices) |
+| Translation | NVIDIA Nemotron-3 Ultra (online NMT, primary) + Argos Translate (offline NMT, fallback) |
+| TTS | Piper (local neural voices, 8 languages: en, fr, hi, es, de, zh, ja, ar) |
 
 ## Quickstart
 
@@ -376,6 +376,7 @@ Every value is read with a safe default (`getattr(settings, KEY, default)`), so 
 | `WHISPER_DEVICE` | `cpu` | CTranslate2 device. `cuda` needs a GPU build of ctranslate2; this project's measured numbers are all `cpu`. |
 | `WHISPER_COMPUTE_TYPE` | `int8` | Quantisation. `int8` is the CPU default and the reason a 122 s take finishes in seconds. |
 | `WHISPER_LANGUAGE` | unset (= auto-detect) | ISO-639-1 code to pin, e.g. `hi`. Empty reproduces auto-detect exactly, so shipping the knob changed nothing. Detection is a guess, and it guessed `id` for a Hindi utterance on this machine and returned romanized noise; pin it when you know the language. |
+| `WHISPER_INITIAL_PROMPT` | unset | Fixed vocabulary to bias the decoder toward - names and domain terms that a larger model still gets wrong. Empty = the library's own no-prompt behaviour, so shipping the knob changed nothing. Not independent of `WHISPER_LANGUAGE`: detection takes no prompt, so pin the language and set the prompt for the vocabulary at hand; keep it short, because it occupies part of the decoder's context. |
 | `LIVE_TRANSCRIBE_EVERY_CHUNKS` | `30` | Frames between rolling-preview runs. `<= 0` is the documented kill switch, and this is the one read wrapped in try/except, so a typo degrades to the default instead of killing the consumer. |
 | `WHISPER_MAX_CONCURRENT` | `1` | The concurrency semaphore: one job in flight per worker process. |
 | `WORKER_POLL_INTERVAL` | `2.0` | Seconds between queue polls. A **float** - the worker wraps it in `float()`, which is why `2` and `2.0` are not the same claim. |
@@ -391,12 +392,68 @@ Every value is read with a safe default (`getattr(settings, KEY, default)`), so 
 | `REDIS_URL` | `redis://127.0.0.1:6379/0` | Channel layer, rate limiter and `last_used_at` throttle. |
 | `HF_OFFLINE` | unset | Sets `HF_HUB_OFFLINE=1` before any Hub import, dropping the 0.5-1.1 s revision round trip from every cold Whisper load. **Leave unset until one successful run has downloaded the model** - with it set, a fresh clone fails instead of fetching the ~75 MB `tiny` weights. |
 | `TS_WARMUP_MODELS` | unset | Runs one second of audio through VAD and Whisper at worker startup. **Costs 2.7-3.2 s** (three self-reports: 3080, 2704 and 3234 ms, all `source=slice`, all `ok=True`) and moves the cold-load plus first-decode cost off the user's first take. Read from the **process environment**, not from `.env`, because `AppConfig.ready()` also runs in Daphne and in every one-off command, and a `.env` flag cannot tell them apart. Set it on the launch line only. |
+| `NVIDIA_API_KEY` | unset | NVIDIA Nemotron-3 Ultra API key for online translation via the NVIDIA Build API (`https://integrate.api.nvidia.com/v1/chat/completions`). Get one from https://build.nvidia.com/. Unset = falls back to argostranslate (offline NMT). Stored in `.env`, never committed. |
+| `NVIDIA_API_BASE` | `https://integrate.api.nvidia.com/v1/chat/completions` | Nemotron chat completions endpoint. Override for a proxy or alternate region. |
+| `NVIDIA_MODEL` | `nvidia/nemotron-3-ultra-550b-a55b` | Nemotron model for translation. Any Nemotron chat model supported by the endpoint. |
+| `NVIDIA_MAX_PARALLEL` | `14` | Max concurrent NVIDIA requests (asyncio semaphore). Hard cap to respect the API key's parallel-connection limit. |
+| `NVIDIA_RPM` | `30` | Max NVIDIA requests per minute (token bucket). Excess requests are held in an `asyncio.Queue` and drained FIFO, respecting both limits simultaneously. |
+| `TTS_VOICE_DIR` | `media/tts_voices` | Directory holding Piper TTS voice models (.onnx + .json). Download from https://github.com/rhasspy/piper/releases/tag/v1.2.0. |
+| `TTS_VOICE_MAP` | `{"en":"en_US-lessac-medium","fr":"fr_FR-siwis-medium","hi":"hi_IN-pratham-medium","es":"es_ES-davefx-medium","de":"de_DE-thorsten-medium","zh":"zh_CN-huayan-medium","ja":"ja_JP-hi_fi_captain-medium","ar":"ar_JO-kareem-medium","default":"en_US-lessac-medium"}` | JSON mapping ISO-639-1 language codes to Piper voice names (without .onnx extension). |
+| `TTS_SILENCE_MS` | `100` | Silence in milliseconds inserted between synthesized TTS segments. |
+| `HF_TOKEN` | unset | Optional Hugging Face token for private/gated model access. |
 
 > **What this table does not list.** The four `DJANGO_*` bootstrap variables (secret, debug flag, two host lists) are in `.env.example` but not here, because they are deployment identity rather than tuning; and `STUDIO_MAX_TAKE_BYTES` is here but not in the template, because it is a hard constant and not a knob. The template is the full surface; this table is the part worth reading before changing.
 
 > **Two caps, on purpose.** `STUDIO_MAX_TAKE_BYTES` (512 MB) covers the microphone path and `UPLOAD_MAX_BYTES` (100 MB) covers uploads. They differ deliberately: a live take is bounded by a human speaking, while an upload is bounded by a stranger. Please don't merge them.
 
-> **Whisper and live-preview knobs: these are wired now.** `WHISPER_MODEL_SIZE`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_LANGUAGE`, `LIVE_TRANSCRIBE_EVERY_CHUNKS`, `STUDIO_STATS_EVERY_CHUNKS`, `WHISPER_MAX_CONCURRENT`, the six `WORKER_*`/`RECOVERY_*` knobs are all assigned in `settings.py` as of commit `806b11d`, so editing them in `.env` changes behaviour. Defaults were copied verbatim from the services' own `getattr` fallbacks, so wiring the read changed nothing for anyone who sets nothing - the same shape as the `UPLOAD_MAX_BYTES` gap closed in `0926812`. Two exceptions, both deliberate. `WHISPER_DETERMINISTIC` is still read straight from `os.environ` by `tsworker.py`, because it has to pin `OMP_NUM_THREADS=1` before CTranslate2 is imported; moving it onto settings would be a behaviour change dressed as a tidy-up. And the `vad_parameters=dict(min_silence_duration_ms=500)` inside the Whisper call is still a hardcode, because whether it should track `VAD_MIN_SILENCE_MS` is an open design question ([decision 10](#10-there-are-two-vad-passes-and-they-are-different-engines)), not a knob to steal. One consequence worth knowing: these reads are unguarded `int()`/`float()`, so a malformed value raises at import and stops every process, `manage.py check` included - the same crash-on-typo shape `VAD_MIN_SILENCE_MS` has had since Phase 4. Silent reversion to a default was rejected, because nobody would ever learn their `.env` was broken. The discriminator in [Verification](#verification) still tells you which knobs are wired in a single command.
+> **Whisper and live-preview knobs: these are wired now.** `WHISPER_MODEL_SIZE`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `WHISPER_LANGUAGE`, `WHISPER_INITIAL_PROMPT`, `LIVE_TRANSCRIBE_EVERY_CHUNKS`, `STUDIO_STATS_EVERY_CHUNKS`, `WHISPER_MAX_CONCURRENT`, the six `WORKER_*`/`RECOVERY_*` knobs are all assigned in `settings.py` as of commit `806b11d`, so editing them in `.env` changes behaviour. Defaults were copied verbatim from the services' own `getattr` fallbacks, so wiring the read changed nothing for anyone who sets nothing - the same shape as the `UPLOAD_MAX_BYTES` gap closed in `0926812`. Two exceptions, both deliberate. `WHISPER_DETERMINISTIC` is still read straight from `os.environ` by `tsworker.py`, because it has to pin `OMP_NUM_THREADS=1` before CTranslate2 is imported; moving it onto settings would be a behaviour change dressed as a tidy-up. And the `vad_parameters=dict(min_silence_duration_ms=500)` inside the Whisper call is still a hardcode, because whether it should track `VAD_MIN_SILENCE_MS` is an open design question ([decision 10](#10-there-are-two-vad-passes-and-they-are-different-engines)), not a knob to steal. One consequence worth knowing: these reads are unguarded `int()`/`float()`, so a malformed value raises at import and stops every process, `manage.py check` included - the same crash-on-typo shape `VAD_MIN_SILENCE_MS` has had since Phase 4. Silent reversion to a default was rejected, because nobody would ever learn their `.env` was broken. The discriminator in [Verification](#verification) still tells you which knobs are wired in a single command.
+
+## Measured facts that constrain design (§3)
+
+These are not opinions. Each was produced by a run on this machine, and each one rules something out.
+
+### 3.1 Language detection cannot be biased by the prompt
+- **Static:** detection is `self.detect_language(features=…)`, a separate method over pre-computed mel features, called at line 942 of the installed `faster_whisper/transcribe.py` (1941 lines). Its signature has no prompt-shaped parameter. Resolved by walking the module's AST.
+- **Dynamic:** take `456d0aff` detects as `'id'` at `0.10968711227178574` — maximum headroom, any pull would show. No-prompt / English-prompt / Devanagari-prompt returned byte-identical language **and** probability to 16 digits.
+- **The arrow runs the other way:** a Devanagari prompt on an `'id'`-decoding take produced no Devanagari at all. So the language decides whether the prompt can be heard; the prompt cannot choose the language. `settings.py` asserted the reverse for two commits and is now corrected.
+
+### 3.2 The name is vocabulary, not capacity — and it is per-take
+| Take | Size / path | Spelling |
+|---|---|---|
+| `651842ef` | tiny | `Sadhan` |
+| `651842ef` | base | `Siddharth` |
+| `3d92ded8` | production, EN 85% | `Sitharth` × **4** (00:21, 01:49, 02:04, 02:11) |
+| truth | — | `Siddhant` |
+
+No model size in the hub cache spells it, because no size has been told which spelling is right. `.env.example:25` independently records the same phenomenon for other words: `"Kamailio" arrives as "KMLU"` and `"Terraform" as "telephone"` — corroborated by arm 1's drop list, which contained `kmlu`.
+
+### 3.3 What a prompt actually buys, and what it costs
+On `651842ef` (244 s telecom résumé): targets exact **1/9 → 7/9**, controls **4/4 → 4/4**, `sadhan 1→0`, `siddhant 0→1`, language identical to 16 digits.
+Cost, measured on the same run: `telephony` → `California` (`DROPPED` includes `telephony`), `wipe 3→2`.
+
+On `3cf6d657` (41 s pipeline test, no glossary terms spoken): the prompt replaced the speaker's own self-identification **"Saturn" with "Siddhant"**.
+
+On `456d0aff` (29 s Hindi, misdetected as `'id'`): the prompt wrote **"Siddhant Kumar" twice** into a sentence containing no such words.
+
+### 3.4 The instrument was blind, and that is the transferable lesson
+The differential built to detect prompt imposition reported `INJECTED: NONE` on the clean take — because it tests membership in a thirteen-word list, and the prompt's own proper noun is outside that list **by construction**. On the jargon take it reported six injections that were in fact six recoveries (the speaker is reading those words). So it was anti-correlated on the take it was tuned for and blind on the two it existed to protect. Only an occurrence counter, added for an unrelated reason, caught the Saturn loss.
+
+**Rule: an instrument's universe must include the thing it is testing for, or the test is a ritual.** Corollary, from six instances: before writing a check, ask what input makes it pass vacuously, and build that input as a fixture first.
+
+### 3.5 Three takes, three disjoint vocabularies, one global knob
+`651842ef` needs Kamailio/Asterisk/VoIP/PBX/Telus. `3cf6d657` needs nothing and was corrupted anyway. `3d92ded8` needs FFmpeg/16 kHz/VAD/WebSocket/chunks — **none of which any prompt tested this session contains.** Therefore `WHISPER_INITIAL_PROMPT` is a **per-speaker, per-take** vocabulary. Setting it deployment-wide fixes one take by corrupting others, and the takes it corrupts are this machine's own archive.
+
+### 3.6 Detection confidence on this hardware is low, often
+Observed probabilities across the session: `0.11, 0.48, 0.56, 0.73, 0.74, 0.85, 0.93, 0.95`. Plain English audio on this mic detected at **0.48**, below the library's own `language_detection_threshold=0.5`, resolved to EN by argmax fallback. So the pin is not an optimisation for code-switched audio; on this hardware it is the difference between a guess and a decision.
+
+### 3.7 Beam size, captured by accident
+Same vocalisation, same take: live preview (beam 1) produced `Oh, oh, oh, oh, oh, oh, oh, oh, oh, oh, oh, oh.`; the authoritative pass (beam 5) produced `Whoo! Whoo! Whoo! Whoo!`. The live preview and the final transcript are different measurements of the same audio, and the interim text must never overwrite the authoritative one.
+
+### 3.8 The "~2x" claim has three bases and must not be edited
+`.env.example:26` and README:375 assert `base` ≈ 2x **decode cost**. The harness measured 1.19–1.94x **wall time, load-inclusive**. The KB records Whisper time as non-monotonic in both duration and speech fraction (`41.6 s → 1.1 s`, `10.6 s → 2.1 s`, `146 s → 2.9 s`). Three different quantities; none refutes or confirms the others. **Leave the README figure alone**, and say why in one sentence rather than hedging.
+
+### 3.9 Segmentation shifts under every decoder-context lever
+Four independent instances (prompt on/off, size change, pin, language). Segment counts are not a stable denominator for any quality claim.
 
 ## Storage layout
 
@@ -505,7 +562,7 @@ sys.path.insert(0, "backend")
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "transtream.settings")
 import django; django.setup()
 from django.conf import settings
-for n in ("WHISPER_MODEL_SIZE","WHISPER_DEVICE","WHISPER_COMPUTE_TYPE",
+for n in ("WHISPER_MODEL_SIZE","WHISPER_DEVICE","WHISPER_COMPUTE_TYPE","WHISPER_INITIAL_PROMPT",
           "LIVE_TRANSCRIBE_EVERY_CHUNKS","WHISPER_DETERMINISTIC",
           "UPLOAD_MAX_BYTES","UPLOAD_RATE_LIMIT_PER_MINUTE"):
     print(f"{n:34s} in settings={hasattr(settings,n)!s:5s} value={getattr(settings,n,None)!r}")
