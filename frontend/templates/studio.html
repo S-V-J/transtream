@@ -271,88 +271,69 @@
         NOT off VAD/transcript success. So even if a later stage fails, you still
         see the raw + normalized evidence instead of being dumped back to Idle.
       -->
-      <template x-if="saved && !recording && !connecting && !normalizing && !vadRunning && !transcribing">
+      <!-- Unified Results: Transcription + Translation for mic and upload -->
+      <template x-if="(saved || upload.takeId) && !recording && !connecting && !normalizing && !vadRunning && !transcribing && !upload.polling">
         <div class="space-y-4">
 
-          <!-- Transcribe | Translation Tabs -->
-          <div class="flex gap-2 border-b border-white/10 pb-2">
-            <button
-              type="button"
-              @click="activeTab = 'transcribe'"
-              :class="activeTab === 'transcribe'
-                ? 'bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-semibold transition'
-                : 'bg-slate-800/50 text-slate-400 px-4 py-2 rounded-xl text-sm font-semibold hover:bg-slate-800/70 transition'"
-            >
-              Transcribe
-            </button>
-            <button
-              type="button"
-              @click="activeTab = 'translate'"
-              :class="activeTab === 'translate'
-                ? 'bg-indigo-600 text-white px-4 py-2 rounded-xl text-sm font-semibold transition'
-                : 'bg-slate-800/50 text-slate-400 px-4 py-2 rounded-xl text-sm font-semibold hover:bg-slate-800/70 transition'"
-            >
-              Translation
-            </button>
-          </div>
+          <!-- Mic Recording Results -->
+          <template x-if="saved && transcriptSegments.length > 0">
+            <div class="rounded-xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <h3 class="text-sm font-semibold text-emerald-300">🎙️ Live Recording — Transcription & Translation</h3>
+              </div>
 
-          <!-- Tab Content: Transcribe -->
-          <template x-if="activeTab === 'transcribe'">
-
-            <!-- Raw file info -->
-            <div class="border-t border-white/10 pt-3">
-              <p class="text-emerald-300">Raw recording saved.</p>
-              <p class="text-slate-300">
-                File: <span class="break-all text-cyan-300" x-text="saved.filename"></span>
-              </p>
-              <p class="text-xs text-slate-400">
-                <span x-text="fmtBytes(saved.bytes)"></span>
-                · <span x-text="saved.chunks"></span> chunks
-                · <span x-text="fmtTime(saved.duration_ms)"></span>
-                · <span x-text="saved.mime || 'unknown'"></span>
-              </p>
-            </div>
-
-            <!-- Normalized file info -->
-            <template x-if="normalized">
+              <!-- File info -->
               <div class="border-t border-white/10 pt-3">
-                <p class="text-blue-300">✓ Normalized WAV ready.</p>
                 <p class="text-slate-300">
-                  File: <span class="break-all text-cyan-300" x-text="normalized.output_file"></span>
+                  File: <span class="break-all text-cyan-300" x-text="saved.filename"></span>
                 </p>
                 <p class="text-xs text-slate-400">
-                  <span x-text="fmtBytes(normalized.size_bytes)"></span>
-                  · <span x-text="fmtTime(normalized.duration_ms)"></span>
-                  · <span x-text="fmtSampleRate(normalized.sample_rate)"></span>
-                  · <span x-text="normalized.channels"></span> ch
-                  · <span x-text="normalized.bit_depth"></span>-bit PCM
+                  <span x-text="fmtBytes(saved.bytes)"></span>
+                  · <span x-text="saved.chunks"></span> chunks
+                  · <span x-text="fmtTime(saved.duration_ms)"></span>
+                  · <span x-text="saved.mime || 'unknown'"></span>
                 </p>
               </div>
-            </template>
 
-            <!-- VAD segmented timeline -->
-            <template x-if="vadSegments.length > 0">
-              <div class="border-t border-white/10 pt-3">
-                <p class="text-purple-300">
-                  ◈ <span x-text="vadSegments.length"></span> speech segment(s) detected
-                  · total speech: <span x-text="fmtTime(vadTotalSpeechMs)"></span>
-                </p>
-                <div class="mt-2 space-y-1">
-                  <template x-for="seg in vadSegments" :key="seg.index">
-                    <div class="flex items-start gap-2 rounded-lg border border-purple-500/10 bg-purple-500/5 px-3 py-1.5 text-xs">
-                      <span class="shrink-0 font-mono text-purple-400" x-text="'[' + seg.index + ']'"></span>
-                      <span class="font-mono text-slate-300" x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                      <span class="text-slate-500" x-text="'(' + (seg.duration_ms / 1000).toFixed(2) + 's)'"></span>
-                    </div>
-                  </template>
+              <!-- Normalized file info -->
+              <template x-if="normalized">
+                <div class="border-t border-white/10 pt-3">
+                  <p class="text-blue-300">✓ Normalized WAV ready.</p>
+                  <p class="text-slate-300">
+                    File: <span class="break-all text-cyan-300" x-text="normalized.output_file"></span>
+                  </p>
+                  <p class="text-xs text-slate-400">
+                    <span x-text="fmtBytes(normalized.size_bytes)"></span>
+                    · <span x-text="fmtTime(normalized.duration_ms)"></span>
+                    · <span x-text="fmtSampleRate(normalized.sample_rate)"></span>
+                    · <span x-text="normalized.channels"></span> ch
+                    · <span x-text="normalized.bit_depth"></span>-bit PCM
+                  </p>
                 </div>
-              </div>
-            </template>
+              </template>
 
-            <!-- Authoritative transcript -->
-            <template x-if="transcriptSegments.length > 0">
+              <!-- VAD segmented timeline -->
+              <template x-if="vadSegments.length > 0">
+                <div class="border-t border-white/10 pt-3">
+                  <p class="text-purple-300">
+                    ◈ <span x-text="vadSegments.length"></span> speech segment(s) detected
+                    · total speech: <span x-text="fmtTime(vadTotalSpeechMs)"></span>
+                  </p>
+                  <div class="mt-2 space-y-1">
+                    <template x-for="seg in vadSegments" :key="seg.index">
+                      <div class="flex items-start gap-2 rounded-lg border border-purple-500/10 bg-purple-500/5 px-3 py-1.5 text-xs">
+                        <span class="shrink-0 font-mono text-purple-400" x-text="'[' + seg.index + ']'"></span>
+                        <span class="font-mono text-slate-300" x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
+                        <span class="text-slate-500" x-text="'(' + (seg.duration_ms / 1000).toFixed(2) + 's)'"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Transcription segments -->
               <div class="border-t border-white/10 pt-3">
-                <p class="text-emerald-300">
+                <p class="mb-2 text-emerald-300">
                   ✓ Transcription complete
                   <span x-show="languageDetected" class="text-slate-500">
                     · language <span class="font-mono text-cyan-300" x-text="languageDetected"></span>
@@ -369,59 +350,23 @@
                   </template>
                 </div>
               </div>
-            </template>
 
-            <!-- Nothing recognized -->
-            <template x-if="transcriptSegments.length === 0 && normalized && vadSegments.length === 0">
-              <div class="border-t border-white/10 pt-3">
-                <p class="text-amber-300">
-                  No speech detected. The take may contain only silence or noise.
-                </p>
-              </div>
-            </template>
-
-            <!-- Upload transcription results (same window as mic transcription) -->
-            <template x-if="upload.segments.length > 0">
-              <div class="border-t border-white/10 pt-3">
-                <p class="text-emerald-300">
-                  ✓ Upload Transcription Complete
-                  <span x-show="upload.language" class="text-slate-500">
-                    · language <span class="font-mono text-cyan-300" x-text="upload.language"></span>
-                    <span x-show="upload.languageProbability > 0"
-                          x-text="'(' + Math.round(upload.languageProbability * 100) + '%)'"></span>
-                  </span>
-                  · <span x-text="fmtTime(upload.durationMs)"></span>
-                  · <span x-text="upload.segments.length"></span> seg
-                </p>
-                <div class="mt-2 space-y-2">
-                  <template x-for="seg in upload.segments" :key="seg.index">
-                    <div class="flex items-start gap-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 px-3 py-2 text-sm">
-                      <span class="mt-0.5 shrink-0 font-mono text-xs text-cyan-400"
-                            x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                      <span class="text-slate-100" x-text="seg.text"
-                            :class="nativeScript ? 'text-lg leading-relaxed' : ''"></span>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </template>
-
-          </template>
-
-          <!-- Tab Content: Translation -->
-          <template x-if="activeTab === 'translate'">
-
-            <!-- Translation / TTS for Mic Recording -->
-            <template x-if="transcriptSegments.length > 0">
-              <div class="border-t border-white/10 pt-3">
-                <label class="mb-3 block text-sm font-medium text-slate-400">Target Language Translation</label>
+              <!-- Translation section for mic (same window, right below transcription) -->
+              <div class="border-t border-white/10 pt-3 mt-4">
+                <label class="mb-3 block text-sm font-medium text-slate-400">Translate Transcription</label>
                 <div class="flex flex-wrap items-center gap-2">
                   <select
                           x-model="micTranslationTarget"
                           :disabled="micTranslationLoading"
                           class="min-w-[180px] rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-300 outline-none focus:border-cyan-400">
-                    <option value="en">English</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option>
-                    <option value="hi">Hindi</option><option value="ar">Arabic</option><option value="zh">Chinese</option><option value="ja">Japanese</option>
+                    <option value="en">English</option>
+                    <option value="fr">French</option>
+                    <option value="es">Spanish</option>
+                    <option value="de">German</option>
+                    <option value="hi">Hindi</option>
+                    <option value="ar">Arabic</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ja">Japanese</option>
                   </select>
                   <button type="button" @click="translateMic()"
                           :disabled="!takeId || micTranslationLoading"
@@ -443,27 +388,69 @@
                   <p class="text-sm text-emerald-300 whitespace-pre-wrap break-words" x-text="micTranslationText"></p>
                 </div>
                 <p x-show="micTranslationLoading" class="mt-3 text-xs text-cyan-400">Translating & synthesizing speech…</p>
-                <p x-show="!micTranslationText && !micTranslationLoading" class="mt-3 text-xs text-slate-500">
-                  Translate the completed mic transcript and play translated audio via Piper TTS.
-                </p>
                 <audio x-ref="ttsAudio" preload="auto" controls class="w-full mt-3" style="display: none;"></audio>
               </div>
-            </template>
+            </div>
+          </template>
 
-            <!-- Upload Translation -->
-            <template x-if="upload.takeId && upload.state === 'done'">
+          <!-- Upload Results -->
+          <template x-if="upload.takeId && upload.segments.length > 0">
+            <div class="rounded-xl border border-white/10 bg-slate-900/60 p-4 shadow-xl shadow-black/20">
+              <div class="mb-3 flex items-center justify-between gap-3">
+                <h3 class="text-sm font-semibold text-cyan-300">📤 Uploaded File — Transcription & Translation</h3>
+              </div>
+
+              <!-- File info -->
               <div class="border-t border-white/10 pt-3">
-                <label class="mb-3 block text-sm font-medium text-slate-400">Target Language Translation (Upload)</label>
+                <p class="text-slate-300">
+                  File: <span class="break-all text-cyan-300" x-text="upload.name"></span>
+                </p>
+                <p class="text-xs text-slate-400">
+                  <span x-text="fmtBytes(upload.size)"></span>
+                  · <span x-text="fmtTime(upload.durationMs)"></span>
+                  · <span x-text="upload.segments.length"></span> seg
+                </p>
+              </div>
+
+              <!-- Transcription segments -->
+              <div class="border-t border-white/10 pt-3">
+                <p class="mb-2 text-emerald-300">
+                  ✓ Transcription complete
+                  <span x-show="upload.language" class="text-slate-500">
+                    · language <span class="font-mono text-cyan-300" x-text="upload.language"></span>
+                  </span>
+                </p>
+                <div class="mt-2 space-y-2">
+                  <template x-for="seg in upload.segments" :key="seg.index">
+                    <div class="flex items-start gap-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 px-3 py-2 text-sm">
+                      <span class="mt-0.5 shrink-0 font-mono text-xs text-cyan-400"
+                            x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
+                      <span class="text-slate-100" x-text="seg.text"
+                            :class="nativeScript ? 'text-lg leading-relaxed' : ''"></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Translation section for upload (same window, right below transcription) -->
+              <div class="border-t border-white/10 pt-3 mt-4">
+                <label class="mb-3 block text-sm font-medium text-slate-400">Translate Transcription</label>
                 <div class="flex flex-wrap items-center gap-2">
                   <select
                           x-model="upload.translationTarget"
                           :disabled="upload.translationLoading"
                           class="min-w-[180px] rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-300 outline-none focus:border-cyan-400">
-                    <option value="en">English</option><option value="fr">French</option><option value="es">Spanish</option><option value="de">German</option>
-                    <option value="hi">Hindi</option><option value="ar">Arabic</option><option value="zh">Chinese</option><option value="ja">Japanese</option>
+                    <option value="en">English</option>
+                    <option value="fr">French</option>
+                    <option value="es">Spanish</option>
+                    <option value="de">German</option>
+                    <option value="hi">Hindi</option>
+                    <option value="ar">Arabic</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ja">Japanese</option>
                   </select>
                   <button type="button" @click="translateUpload()"
-                          :disabled="!upload.takeId || upload.translationLoading || upload.state !== 'done'"
+                          :disabled="!upload.takeId || upload.translationLoading"
                           :class="upload.translationLoading
                             ? 'bg-slate-700/60 text-slate-400 cursor-not-allowed'
                             : 'bg-indigo-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400'">
@@ -477,13 +464,10 @@
                   <p class="text-sm text-emerald-300 whitespace-pre-wrap break-words" x-text="upload.translationText"></p>
                 </div>
                 <p x-show="upload.translationLoading" class="mt-3 text-xs text-cyan-400">Translating…</p>
-                <p x-show="!upload.translationText && !upload.translationLoading" class="mt-3 text-xs text-slate-500">
-                  Translate the completed upload transcript. Powered by Argos Translate (offline NMT).
-                </p>
               </div>
-            </template>
-
+            </div>
           </template>
+
         </div>
       </template>
     </div>
@@ -646,32 +630,6 @@
           </div>
         </template>
       </div>
-
-      <!-- Result -->
-      <template x-if="upload.segments.length > 0">
-        <div class="mt-4 border-t border-white/10 pt-3">
-          <p class="text-sm text-emerald-300">
-            ✓ Transcription complete
-            <span x-show="upload.language" class="text-slate-500">
-              · language <span class="font-mono text-cyan-300" x-text="upload.language"></span>
-              <span x-show="upload.languageProbability > 0"
-                    x-text="'(' + Math.round(upload.languageProbability * 100) + '%)'"></span>
-            </span>
-            · <span x-text="fmtTime(upload.durationMs)"></span>
-            · <span x-text="upload.segments.length"></span> seg
-          </p>
-          <div class="mt-2 space-y-2">
-            <template x-for="seg in upload.segments" :key="seg.index">
-              <div class="flex items-start gap-2 rounded-lg border border-cyan-500/10 bg-cyan-500/5 px-3 py-2 text-sm">
-                <span class="mt-0.5 shrink-0 font-mono text-xs text-cyan-400"
-                      x-text="fmtSegTime(seg.start_ms) + ' → ' + fmtSegTime(seg.end_ms)"></span>
-                <span class="text-slate-100" x-text="seg.text"
-                      :class="nativeScript ? 'text-lg leading-relaxed' : ''"></span>
-              </div>
-            </template>
-          </div>
-        </div>
-      </template>
 
       <p class="mt-3 text-[11px] text-slate-600">
         Uploads are processed by the background worker
