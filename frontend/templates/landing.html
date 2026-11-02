@@ -123,14 +123,79 @@
             </p>
         </div>
 
-        <!-- Hero visual - pipeline diagram -->
-        <div class="mt-16 flex justify-center">
-            <img
-                src="{% static 'images/pipeline-diagram.png' %}"
-                alt="TranStream pipeline: mic → upload → normalize → segment → transcribe → translate → TTS → disk"
-                class="rounded-2xl border border-white/10 bg-slate-900/40 shadow-2xl max-w-3xl w-full h-auto object-contain"
-                loading="lazy"
-            />
+        <!-- Hero visual - centered block diagram -->
+        <div class="mt-16 flex flex-col items-center">
+            <div class="max-w-4xl w-full grid grid-cols-1 md:grid-cols-2 gap-6 mx-4 md:mx-0">
+                <!-- Step 1 -->
+                <div class="flex flex-col items-center gap-3 group">
+                    <div class="relative flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-500/20 to-emerald-500/20 border border-cyan-500/30 shadow-lg shadow-cyan-500/10 group-hover:shadow-cyan-500/20 transition-all duration-300">
+                        <div class="relative z-10 text-cyan-400 text-xl font-bold">🎙️</div>
+                        <div class="absolute -inset-1 rounded-2xl bg-gradient-to-r from-cyan-500 to-emerald-500 opacity-0 group-hover:opacity-10 blur opacity-0 transition-opacity duration-300"></div>
+                    </div>
+                    <div class="text-center text-sm font-medium text-white">
+                        Speak into the mic<br class="hidden sm:block"/>or upload a file
+                    </div>
+                </div>
+
+                <!-- Arrow 1 -->
+                <div class="hidden md:flex items-center justify-center">
+                    <div class="flex h-6 w-1 items-center justify-center">
+                        <svg class="h-full w-full text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                </div>
+
+                <!-- Step 2 -->
+                <div class="flex flex-col items-center gap-3 group">
+                    <div class="relative flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 border border-purple-500/30 shadow-lg shadow-purple-500/10 group-hover:shadow-purple-500/20 transition-all duration-300">
+                        <div class="relative z-10 text-purple-400 text-xl font-bold">🧠</div>
+                        <div class="absolute -inset-1 rounded-2xl bg-gradient-to-r from-purple-500 to-pink-500 opacity-0 group-hover:opacity-10 blur opacity-0 transition-opacity duration-300"></div>
+                    </div>
+                    <div class="text-center text-sm font-medium text-white">
+                        TranStream listens<br class="hidden sm:block"/>and understands
+                    </div>
+                </div>
+
+                <!-- Arrow 2 -->
+                <div class="hidden md:flex items-center justify-center">
+                    <div class="flex h-6 w-1 items-center justify-center">
+                        <svg class="h-full w-full text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                </div>
+
+                <!-- Step 3 -->
+                <div class="flex flex-col items-center gap-3 group">
+                    <div class="relative flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-500/20 to-orange-500/20 border border-amber-500/30 shadow-lg shadow-amber-500/10 group-hover:shadow-amber-500/20 transition-all duration-300">
+                        <div class="relative z-10 text-amber-400 text-xl font-bold">🌍</div>
+                        <div class="absolute -inset-1 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 opacity-0 group-hover:opacity-10 blur opacity-0 transition-opacity duration-300"></div>
+                    </div>
+                    <div class="text-center text-sm font-medium text-white">
+                        Reads it back<br class="hidden sm:block"/>in your language
+                    </div>
+                </div>
+
+                <!-- Arrow 3 -->
+                <div class="hidden md:flex items-center justify-center">
+                    <div class="flex h-6 w-1 items-center justify-center">
+                        <svg class="h-full w-full text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                </div>
+
+                <!-- Step 4 -->
+                <div class="flex flex-col items-center gap-3 group">
+                    <div class="relative flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-rose-500/20 to-red-500/20 border border-rose-500/30 shadow-lg shadow-rose-500/10 group-hover:shadow-rose-500/20 transition-all duration-300">
+                        <div class="relative z-10 text-rose-400 text-xl font-bold">💾</div>
+                        <div class="absolute -inset-1 rounded-2xl bg-gradient-to-r from-rose-500 to-red-500 opacity-0 group-hover:opacity-10 blur opacity-0 transition-opacity duration-300"></div>
+                    </div>
+                    <div class="text-center text-sm font-medium text-white">
+                        Stays on your<br class="hidden sm:block"/>computer only
+                    </div>
+                </div>
+
+                <!-- Arrow 4 (curved bottom arrow for mobile) -->
+                <div class="md:hidden mt-6 flex items-center justify-center">
+                    <svg class="h-4 w-12 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 14l-7 7m0 0l-7-7m7 7V3"/></svg>
+                </div>
+            </div>
         </div>
     </section>
 
