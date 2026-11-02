@@ -34,8 +34,7 @@ document.addEventListener('alpine:init', () => {
     saved: null,
     sessionId: '',
     nativeScript: false,
-
-    // ── Phase 3: normalization ──
+    takeId: '',
     normalizing: false,
     normalized: null,
     normalizeMessage: '',
@@ -58,6 +57,15 @@ document.addEventListener('alpine:init', () => {
     liveSegmentCount: 0,
     liveLanguage: '',
     liveActive: false,          // true only while a take is in progress
+    activeTab: 'transcribe',    // 'transcribe' | 'translate'
+
+    // ── Phase 9/10: mic translation + TTS ──
+    micTranslationTarget: 'en',
+    micTranslationLoading: false,
+    micTranslationError: '',
+    micTranslationText: '',
+    micTranslationSource: '',
+    ttsPlaying: false,
 
     // ── counters ─
     chunksSent: 0,
@@ -94,6 +102,11 @@ document.addEventListener('alpine:init', () => {
       language: '',
       languageProbability: 0,
       durationMs: 0,
+      translationTarget: 'en',
+      translationText: '',
+      translationSource: '',
+      translationLoading: false,
+      translationError: '',
       polling: false,
       _timer: null,
       _deadline: 0,
@@ -125,6 +138,7 @@ document.addEventListener('alpine:init', () => {
       this.languageDetected = ''; this.languageProbability = 0; this.transcriptSegments = [];
       this.liveTranscriptText = ''; this.liveSegmentCount = 0; this.liveLanguage = '';
       this.liveActive = true;
+      this.activeTab = 'transcribe';
 
       this.chunksSent = 0; this.chunksReceived = 0; this.bytesReceived = 0;
       this.serverDurationMs = 0; this.elapsedMs = 0;
@@ -194,6 +208,7 @@ document.addEventListener('alpine:init', () => {
         mime: mime || 'unknown',
         client_ts: Date.now(),
         session: this.sessionId,
+        translation_target: this.micTranslationTarget || '',
       }));
 
       this._recorder.start(100);
@@ -222,11 +237,10 @@ document.addEventListener('alpine:init', () => {
         this._ws.send(JSON.stringify({ type: 'stop', client_ts: Date.now() }));
       }
 
-      // Preview is over the moment we stop; clear it so the results view
-      // is never visually competing with stale live text.
+      // Preview text persists after stop so the user can still read what was
+      // captured. Only the live-active flag is cleared; the last live preview
+      // stays visible until a new recording starts.
       this.liveActive = false;
-      this.liveTranscriptText = '';
-      this.liveSegmentCount = 0;
 
       this._cleanupStream();
     },
@@ -263,7 +277,13 @@ document.addEventListener('alpine:init', () => {
           }
         };
 
-        ws.onmessage = (evt) => this._handleServerMessage(evt);
+        ws.onmessage = (evt) => {
+          if (evt.data instanceof ArrayBuffer) {
+            this._handleTtsAudio(evt.data);
+          } else {
+            this._handleServerMessage(evt);
+          }
+        };
 
         setTimeout(() => {
           if (!settled) {
@@ -300,6 +320,7 @@ document.addEventListener('alpine:init', () => {
 
         case 'saved':
           this.saved = msg;
+          if (msg.take_id) this.takeId = msg.take_id;
           break;
 
         // ── Phase 5.5: live rolling preview ──
@@ -350,9 +371,8 @@ document.addEventListener('alpine:init', () => {
             this.transcriptSegments = msg.segments;
           }
           this.transcribeMessage = '';
-          // Authoritative text supersedes the preview entirely.
-          this.liveTranscriptText = '';
-          this.liveSegmentCount = 0;
+          // Live preview text is intentionally NOT cleared here — it persists
+          // until a new recording starts, so the user always has something readable.
           break;
 
         case 'error':
@@ -360,15 +380,100 @@ document.addEventListener('alpine:init', () => {
           if (msg.stage === 'normalization') { this.normalizing = false; this.normalizeMessage = ''; }
           if (msg.stage === 'vad') { this.vadRunning = false; this.vadMessage = ''; }
           if (msg.stage === 'transcription') { this.transcribing = false; this.transcribeMessage = ''; }
+          if (msg.stage === 'translation') { this.upload.translationLoading = false; this.micTranslationLoading = false; }
+          if (msg.stage === 'tts') { this.upload.translationLoading = false; this.micTranslationLoading = false; this.ttsPlaying = false; }
           this.error = msg.message || 'Server error.';
           if (this.recording) { try { this.stop(); } catch (e) { /* ignore */ } }
           break;
+
+        // ── Phase 9/10: Translation + TTS ──
+        case 'translation_started':
+          if (msg.stage === 'mic') {
+            this.micTranslationLoading = true;
+            this.micTranslationError = '';
+            this.micTranslationText = '';
+          } else {
+            this.upload.translationLoading = true;
+            this.upload.translationError = '';
+          }
+          break;
+
+        case 'translation_complete':
+          this.micTranslationSource = msg.source_language || '';
+          this.micTranslationTarget = msg.target_language || '';
+          this.micTranslationText = msg.text || '';
+          this.ttsPlaying = true;
+          break;
+
+        case 'tts_started':
+          this.micTranslationLoading = true;
+          break;
+
+        case 'tts_complete':
+          this.micTranslationLoading = false;
+          this.ttsPlaying = false;
+          break;
       }
+    },
+
+    _handleTtsAudio(arrayBuffer) {
+      // Received binary PCM audio from server - play it
+      if (!this._ttsAudioContext) {
+        this._ttsAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: 16000,
+        });
+      }
+      const ctx = this._ttsAudioContext;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      // Convert ArrayBuffer to AudioBuffer and play
+      const audioData = new Int16Array(arrayBuffer);
+      const float32 = new Float32Array(audioData.length);
+      for (let i = 0; i < audioData.length; i++) {
+        float32[i] = audioData[i] / 32768.0; // int16 -> float32 [-1, 1]
+      }
+      const buffer = ctx.createBuffer(1, float32.length, 16000);
+      buffer.copyToChannel(float32, 0);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
     },
 
     // ── Phase 7: upload controls ────────────────────────────────────────
 
     pickUploadFile() {
+      const el = document.getElementById('ts-upload-input');
+      if (el) el.click();
+    },
+
+    async openFileSystem() {
+      // Native File System Access API (modern browsers): let the user pick
+      // a local folder or file. Falls back to a hidden file input.
+      try {
+        if (window.showOpenFilePicker) {
+          const handles = await window.showOpenFilePicker({
+            multiple: true,
+            types: [
+              {
+                description: 'Audio files',
+                accept: {
+                  'audio/*': ['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aac', '.webm', '.wma'],
+                },
+              },
+            ],
+          });
+          for (const handle of handles) {
+            const file = await handle.getFile();
+            this.setUploadFile(file);
+            break; // pick the first one; user can repeat
+          }
+          return;
+        }
+      } catch (e) {
+        // User cancelled or API unavailable -> fall through to input fallback.
+      }
+
       const el = document.getElementById('ts-upload-input');
       if (el) el.click();
     },
@@ -419,6 +524,11 @@ document.addEventListener('alpine:init', () => {
       u.language = '';
       u.languageProbability = 0;
       u.durationMs = 0;
+      u.translationTarget = 'en';
+      u.translationText = '';
+      u.translationSource = '';
+      u.translationLoading = false;
+      u.translationError = '';
     },
 
     clearUpload() {
@@ -429,6 +539,11 @@ document.addEventListener('alpine:init', () => {
       u.jobId = null; u.takeId = null;
       u.state = ''; u.pct = 0; u.error = null; u.code = '';
       u.segments = []; u.language = ''; u.languageProbability = 0; u.durationMs = 0;
+      u.translationTarget = 'en';
+      u.translationText = '';
+      u.translationSource = '';
+      u.translationLoading = false;
+      u.translationError = '';
     },
 
     async startUpload() {
@@ -572,6 +687,94 @@ document.addEventListener('alpine:init', () => {
         u.durationMs = d.duration_ms || 0;
       } catch (err) {
         u.error = 'Transcript fetch failed: ' + this._errMessage(err);
+      }
+    },
+
+    // ── Translation (Slice A) ─────────────────────────────────────────
+
+    _apiPost(url, body) {
+      return fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-CSRFToken': this._csrfToken(),
+        },
+        body: JSON.stringify(body),
+      });
+    },
+
+    async translateUpload() {
+      const u = this.upload;
+      if (!u.takeId || u.translationLoading) return;
+
+      u.translationLoading = true;
+      u.translationError = '';
+      u.translationText = '';
+      u.translationSource = u.language || 'en';
+
+      try {
+        const resp = await this._apiPost('/studio/translate/', {
+          take_id: u.takeId,
+          target_language: u.translationTarget,
+        });
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          throw new Error(d.error || 'Translation failed (HTTP ' + resp.status + ').');
+        }
+        const d = await resp.json();
+        u.translationSource = d.source_language || u.translationSource;
+        u.translationTarget = d.target_language || u.translationTarget;
+        u.translationText = d.text || '';
+      } catch (err) {
+        u.translationError = this._errMessage(err);
+      } finally {
+        u.translationLoading = false;
+      }
+    },
+
+    async translateMic() {
+      if (!this.takeId || this.micTranslationLoading) return;
+
+      this.micTranslationLoading = true;
+      this.micTranslationError = '';
+      this.micTranslationText = '';
+
+      try {
+        const resp = await this._apiPost('/studio/translate/', {
+          take_id: this.takeId,
+          target_language: this.micTranslationTarget,
+        });
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          throw new Error(d.error || 'Translation failed (HTTP ' + resp.status + ').');
+        }
+        const d = await resp.json();
+        this.micTranslationSource = d.source_language || this.micTranslationSource;
+        this.micTranslationTarget = d.target_language || this.micTranslationTarget;
+        this.micTranslationText = d.text || '';
+
+        // Trigger TTS synthesis via WebSocket for audio playback
+        if (this._ws && this._ws.readyState === WebSocket.OPEN) {
+          this._ws.send(JSON.stringify({
+            type: 'tts_request',
+            take_id: this.takeId,
+            target_language: this.micTranslationTarget,
+          }));
+        }
+      } catch (err) {
+        this.micTranslationError = this._errMessage(err);
+      } finally {
+        this.micTranslationLoading = false;
+      }
+    },
+
+    stopTtsPlayback() {
+      this.ttsPlaying = false;
+      this.micTranslationLoading = false;
+      if (this._ttsAudioContext) {
+        try { this._ttsAudioContext.close(); } catch (e) { /* ignore */ }
+        this._ttsAudioContext = null;
       }
     },
 
