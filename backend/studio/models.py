@@ -110,6 +110,14 @@ class Take(models.Model):
     language = models.CharField(max_length=16, blank=True, default="", db_index=True)
     language_probability = models.FloatField(null=True, blank=True)
 
+    # Per-take Whisper overrides (Phase 8+ / step G).
+    # language_hint: caller's request-time language pin (empty = auto-detect).
+    # initial_prompt: caller's request-time fixed vocabulary (empty = library default).
+    # Neither is overwritten by the pipeline: save_whisper_transcript only
+    # touches language and language_probability.
+    language_hint = models.CharField(max_length=16, blank=True, default="")
+    initial_prompt = models.TextField(blank=True, default="")
+
     created_at = models.DateTimeField(default=timezone.now, editable=False)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -256,6 +264,37 @@ class Segment(models.Model):
     def __str__(self):
         preview = (self.text[:40] + "…") if len(self.text) > 40 else self.text
         return f"[{self.source}#{self.index}] {self.start_ms}->{self.end_ms}ms {preview!r}"
+
+
+class Translation(models.Model):
+    """
+    A full-document translation for a Take. One row per target language.
+    Source language is taken from the Take's detected language at translation time.
+    """
+    take = models.ForeignKey(
+        Take, on_delete=models.CASCADE, related_name="translations"
+    )
+    source_language = models.CharField(max_length=16, db_index=True)
+    target_language = models.CharField(max_length=16, db_index=True)
+    text = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now, editable=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["take", "target_language"],
+                name="uniq_translation_per_target",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["take", "source_language"], name="trans_take_src_idx"),
+        ]
+
+    def __str__(self):
+        preview = (self.text[:40] + "…") if len(self.text) > 40 else self.text
+        return f"Translation {self.source_language}->{self.target_language} for {self.take.id.hex[:8]}: {preview!r}"
 
 
 class ApiKey(models.Model):
