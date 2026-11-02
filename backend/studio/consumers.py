@@ -59,7 +59,15 @@ from studio.transcription_service import (
     join_segments,
     transcribe_audio,
 )
+from studio.translation_service import TranslationError, translate_take
 from studio.vad_service import VADError, extract_speech_segments
+from studio.tts_service import (
+    TTSError,
+    synthesize_text,
+    synthesize_segments,
+    tts_status,
+    get_voice_for_language,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +324,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             info["path"],
             info.get("duration_ms", 0),
             info.get("mime", ""),
+            getattr(self, "_language_hint", None),
+            getattr(self, "_initial_prompt", None),
         )
 
     async def receive(self, text_data=None, bytes_data=None):
@@ -339,6 +349,8 @@ class AudioConsumer(AsyncWebsocketConsumer):
             await self.handle_start(payload)
         elif control_type == "stop":
             await self.handle_stop(payload)
+        elif control_type == "tts_request":
+            await self.handle_tts_request(payload)
         else:
             await self._safe_send({
                 "type": "error",
@@ -362,6 +374,9 @@ class AudioConsumer(AsyncWebsocketConsumer):
         self.live_chunk_counter = 0
         self._live_busy = False
         self._take = None
+        self._language_hint = (payload.get("language") or "").strip() or None
+        self._initial_prompt = (payload.get("initial_prompt") or "").strip() or None
+        self._translation_target = (payload.get("translation_target") or "").strip().lower() or None
 
         await self._safe_send({
             "type": "started",
@@ -394,7 +409,10 @@ class AudioConsumer(AsyncWebsocketConsumer):
         })
 
         if info["filename"]:
-            await self._safe_send({"type": "saved", **info})
+            saved_msg = {"type": "saved", **info}
+            if self._take is not None:
+                saved_msg["take_id"] = str(self._take.take_id)
+            await self._safe_send(saved_msg)
             if info.get("path"):
                 await self._run_post_processing(Path(info["path"]))
         else:
@@ -402,6 +420,81 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "type": "error",
                 "message": "Recording stopped, but no audio data was received.",
             })
+
+    async def handle_tts_request(self, payload):
+        """
+        Handle manual TTS request from frontend (Translate & Speak button).
+        Expected payload: {"type": "tts_request", "take_id": "...", "target_language": "..."}
+        """
+        take_id_str = payload.get("take_id")
+        target_lang = (payload.get("target_language") or "").strip().lower()
+
+        if not take_id_str or not target_lang:
+            await self._safe_send({
+                "type": "error",
+                "message": "tts_request requires take_id and target_language",
+            })
+            return
+
+        try:
+            from uuid import UUID
+            take_id = UUID(take_id_str)
+        except ValueError:
+            await self._safe_send({
+                "type": "error",
+                "message": "Invalid take_id format",
+            })
+            return
+
+        # Look up the take and its segments
+        take = await self._db(persistence.get_take_by_id, take_id)
+        if not take:
+            await self._safe_send({
+                "type": "error",
+                "message": f"Take not found: {take_id_str}",
+            })
+            return
+
+        # Get whisper segments
+        segments = await self._db(persistence.get_whisper_segments, take)
+        if not segments:
+            await self._safe_send({
+                "type": "error",
+                "message": f"Take {take_id_str} has no Whisper segments",
+            })
+            return
+
+        # Get normalized WAV path
+        wav_path = await self._db(persistence.get_normalized_path, take)
+        if not wav_path or not wav_path.exists():
+            await self._safe_send({
+                "type": "error",
+                "message": f"Normalized audio not found for take {take_id_str}",
+            })
+            return
+
+        # Source language: prefer per-take hint, else detected language
+        src_lang = take.language_hint.strip().lower() or take.language.strip().lower()
+        if not src_lang:
+            await self._safe_send({
+                "type": "error",
+                "message": f"Take {take_id_str} has no detected language",
+            })
+            return
+
+        # Skip if target == source
+        if src_lang == target_lang:
+            await self._safe_send({
+                "type": "error",
+                "message": f"Target language ({target_lang}) same as source ({src_lang})",
+            })
+            return
+
+        # Set translation target for the TTS pipeline
+        self._translation_target = target_lang
+
+        # Trigger translation + TTS
+        await self._trigger_translation_tts(wav_path, src_lang, segments)
 
     # ── post-stop pipeline (PROVEN f589bb2 chain + 6a-wire persistence) ─
 
@@ -503,7 +596,15 @@ class AudioConsumer(AsyncWebsocketConsumer):
         try:
             # beam_size=5 -> authoritative pass. thread_sensitive=True is safe
             # here because recording has already ended (no writes to starve).
-            result = await sync_to_async(transcribe_audio, thread_sensitive=True)(wav_path, 5)
+            # Per-take language + initial_prompt thread through from the start
+            # payload; empty means settings default (unchanged behaviour).
+            take_language = self._take.language_hint.strip() or None
+            take_prompt = self._take.initial_prompt.strip() or None
+            result = await sync_to_async(transcribe_audio, thread_sensitive=True)(
+                wav_path, 5,
+                language=take_language,
+                initial_prompt=take_prompt,
+            )
             await self._safe_send({
                 "type": "transcribing_complete",
                 "input_file": wav_path.name,
@@ -519,6 +620,14 @@ class AudioConsumer(AsyncWebsocketConsumer):
                     result["language"],
                     result["language_probability"],
                     result["segments"],
+                )
+            # ── Phase 9/10: trigger translation + TTS if target language set ──
+            if (self._take is not None
+                and hasattr(self, "_translation_target")
+                and self._translation_target
+                and self._translation_target != result["language"]):
+                await self._trigger_translation_tts(
+                    wav_path, result["language"], result["segments"]
                 )
         except TranscriptionError as exc:
             logger.warning("Transcription failed for %s: %s", wav_path.name, exc)
@@ -542,6 +651,112 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 "normalized_saved": True,
                 "normalized_file": wav_path.name,
             })
+
+    # ── Phase 9/10: Translation + TTS pipeline ───────────────────────────
+
+    async def _trigger_translation_tts(self, wav_path: Path, source_lang: str, segments: list[dict]):
+        """
+        Translate Whisper segments to target language and synthesize to speech.
+        Streams TTS audio frames over WebSocket for real-time playback.
+        """
+        target_lang = self._translation_target
+        if not target_lang or target_lang == source_lang:
+            return
+
+        await self._safe_send({
+            "type": "translation_started",
+            "stage": "mic",
+            "source_language": source_lang,
+            "target_language": target_lang,
+            "message": f"Translating {source_lang} → {target_lang}...",
+        })
+
+        try:
+            # Translate full text
+            full_text = " ".join(s.get("text", "") for s in segments if s.get("text")).strip()
+            if not full_text:
+                await self._safe_send({
+                    "type": "error",
+                    "message": "No text to translate",
+                    "stage": "translation",
+                })
+                return
+
+            translated = await sync_to_async(translate_take)(
+                self._take, target_lang
+            )
+            translated_text = translated["text"]
+
+            await self._safe_send({
+                "type": "translation_complete",
+                "source_language": translated["source_language"],
+                "target_language": translated["target_language"],
+                "text": translated_text,
+            })
+
+            # Synthesize and stream TTS audio
+            await self._safe_send({
+                "type": "tts_started",
+                "target_language": target_lang,
+                "voice": get_voice_for_language(target_lang),
+                "message": "Synthesizing speech...",
+            })
+
+            # Stream TTS segments as binary WebSocket frames
+            segment_count = 0
+            async for audio_chunk in self._stream_tts_audio(segments, target_lang):
+                if audio_chunk:
+                    # Send binary frame with TTS audio
+                    await self.send(bytes_data=audio_chunk)
+                    segment_count += 1
+
+            await self._safe_send({
+                "type": "tts_complete",
+                "target_language": target_lang,
+                "segments_synthesized": segment_count,
+            })
+
+        except TranslationError as exc:
+            logger.warning("Translation failed for %s: %s", wav_path.name, exc)
+            await self._safe_send({
+                "type": "error",
+                "message": f"Translation failed: {exc}",
+                "stage": "translation",
+            })
+        except TTSError as exc:
+            logger.warning("TTS failed for %s: %s", wav_path.name, exc)
+            await self._safe_send({
+                "type": "error",
+                "message": f"TTS synthesis failed: {exc}",
+                "stage": "tts",
+            })
+        except Exception as exc:
+            logger.exception("Unexpected translation/TTS error for %s", wav_path.name)
+            await self._safe_send({
+                "type": "error",
+                "message": f"Translation/TTS error: {exc}",
+                "stage": "translation",
+            })
+
+    async def _stream_tts_audio(self, segments: list[dict], target_lang: str):
+        """
+        Synthesize segments to speech and yield PCM audio chunks.
+        Runs in thread pool to avoid blocking the event loop.
+        """
+        silence_ms = getattr(settings, "TTS_SILENCE_MS", 100)
+        voice = get_voice_for_language(target_lang)
+
+        def _synthesize():
+            return list(synthesize_segments(segments, target_lang, voice, silence_ms))
+
+        try:
+            audio_chunks = await sync_to_async(_synthesize, thread_sensitive=False)()
+            for chunk in audio_chunks:
+                if chunk:
+                    yield chunk
+        except Exception as exc:
+            logger.warning("TTS streaming failed: %s", exc)
+            raise TTSError(f"TTS streaming failed: {exc}") from exc
 
     # ── live rolling preview (isolated; unchanged from 5.5; NOT persisted) ─
 
@@ -646,8 +861,13 @@ class AudioConsumer(AsyncWebsocketConsumer):
                 return
 
             # 3) inference on the GENERAL thread pool -> write_chunk keeps flowing
+            # Per-take language + initial_prompt thread through.
+            take_language = self._take.language_hint.strip() or None
+            take_prompt = self._take.initial_prompt.strip() or None
             result = await sync_to_async(transcribe_audio, thread_sensitive=False)(
                 Path(live_wav_path), 1,          # beam_size=1 => lowest latency
+                language=take_language,
+                initial_prompt=take_prompt,
             )
 
             if gen != self._live_gen:

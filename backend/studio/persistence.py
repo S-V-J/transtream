@@ -72,7 +72,8 @@ def relpath_for(abs_path):
 # ─── Take / Job creation ─────────────────────────────────────────────────
 
 @_best_effort(None)
-def create_mic_take(user, source_filename, raw_abs_path, duration_ms, mime=""):
+def create_mic_take(user, source_filename, raw_abs_path, duration_ms, mime="",
+                    language_hint="", initial_prompt=""):
     """
     Persist a microphone take the moment its raw bytes are finalized on disk.
     Creates Take + an initial Job already in NORMALIZING (the consumer calls
@@ -84,6 +85,8 @@ def create_mic_take(user, source_filename, raw_abs_path, duration_ms, mime=""):
         source_filename=source_filename or "",
         raw_relpath=relpath_for(raw_abs_path),
         duration_ms=int(duration_ms or 0),
+        language_hint=language_hint.strip().lower()[:16],
+        initial_prompt=initial_prompt,
     )
     Job.objects.create(
         take=take,
@@ -97,7 +100,8 @@ def create_mic_take(user, source_filename, raw_abs_path, duration_ms, mime=""):
 
 
 @_best_effort(None)
-def create_upload_take(user, source_filename, raw_abs_path, duration_ms=None):
+def create_upload_take(user, source_filename, raw_abs_path, duration_ms=None,
+                                 language_hint="", initial_prompt=""):
     """
     Persist an uploaded-file take (Phase 7). Same shape as mic but kind=upload.
     duration_ms may be None until ffprobe/normalization measures it.
@@ -108,6 +112,8 @@ def create_upload_take(user, source_filename, raw_abs_path, duration_ms=None):
         source_filename=source_filename or "",
         raw_relpath=relpath_for(raw_abs_path),
         duration_ms=int(duration_ms) if duration_ms is not None else 0,
+        language_hint=language_hint.strip().lower()[:16],
+        initial_prompt=initial_prompt,
     )
     Job.objects.create(
         take=take,
@@ -252,3 +258,81 @@ def mark_job_failed(take, stage, error):
         take.id.hex[:8], stage, job.attempts, job.max_attempts, error,
     )
     return True
+
+# ─── Translation persistence (Slice A / Task H) ───────────────────────────
+
+@_best_effort(None)
+def save_translation(take, source_language: str, target_language: str, text: str):
+    """
+    Upsert a Translation row for a Take + target language.
+    Non-fatal: returns the Translation instance or None on DB failure.
+    """
+    from studio.models import Translation
+    return Translation.objects.update_or_create(
+        take=take,
+        target_language=target_language.strip().lower(),
+        defaults={
+            "source_language": source_language.strip().lower(),
+            "text": text,
+        },
+    )[0]
+
+
+# ─── Take / segment / path readers (for manual TTS requests) ────────────────
+
+@_best_effort(None)
+def get_take_by_id(take_id):
+    """
+    Look up a Take by its UUID primary key. Returns Take instance or None.
+    Non-fatal.
+    """
+    try:
+        return Take.objects.get(id=take_id)
+    except Take.DoesNotExist:
+        return None
+
+
+@_best_effort([])
+def get_whisper_segments(take):
+    """
+    Fetch all Whisper segments for a take, ordered by index.
+    Returns list of dicts: [{index, start_ms, end_ms, duration_ms, text}, ...]
+    """
+    from django.conf import settings as _s
+    qs = Segment.objects.filter(take=take, source=SegmentSource.WHISPER).order_by("index")
+    return [
+        {
+            "index": s.index,
+            "start_ms": s.start_ms,
+            "end_ms": s.end_ms,
+            "duration_ms": s.duration_ms,
+            "text": s.text or "",
+        }
+        for s in qs
+    ]
+
+
+@_best_effort(None)
+def get_normalized_path(take):
+    """
+    Return the normalized WAV absolute Path for a take, or None.
+    """
+    if not take.normalized_relpath:
+        return None
+    return Path(settings.MEDIA_ROOT) / take.normalized_relpath
+
+
+@_best_effort(None)
+def get_translation(take, target_language: str):
+    """
+    Fetch an existing Translation for a Take + target language.
+    Returns Translation instance or None.
+    """
+    from studio.models import Translation
+    try:
+        return Translation.objects.get(
+            take=take,
+            target_language=target_language.strip().lower(),
+        )
+    except Translation.DoesNotExist:
+        return None

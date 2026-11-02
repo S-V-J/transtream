@@ -200,7 +200,9 @@ def _stream_to_disk(uploaded: UploadedFile, dest: Path, max_bytes: int) -> int:
 
 # ─── Main entry point ────────────────────────────────────────────────────
 
-def handle_upload(user, uploaded_file: UploadedFile, language_hint: str | None = None) -> dict:
+def handle_upload(user, uploaded_file: UploadedFile,
+                    language_hint: str | None = None,
+                    initial_prompt: str | None = None) -> dict:
     """
     Validate, stream, and enqueue one uploaded audio file.
 
@@ -215,6 +217,9 @@ def handle_upload(user, uploaded_file: UploadedFile, language_hint: str | None =
                        Take row; the worker's transcribe stage will use it
                        to skip LID when present. Phase 8 API accepts this
                        as a form field; Phase 7 browser omits it (auto-detect).
+        initial_prompt: Optional fixed vocabulary for the decoder. Empty
+                       means library default. Stored on the Take row and
+                       passed to the worker's transcribe stage.
 
     Returns:
         dict with keys:
@@ -267,6 +272,8 @@ def handle_upload(user, uploaded_file: UploadedFile, language_hint: str | None =
         source_filename=filename,
         raw_abs_path=str(raw_path),
         duration_ms=None,  # worker's normalize stage will measure it
+        language_hint=language_hint or "",
+        initial_prompt=initial_prompt or "",
     )
 
     if take is None:
@@ -285,10 +292,7 @@ def handle_upload(user, uploaded_file: UploadedFile, language_hint: str | None =
             "extension": ext,
         }
 
-    # Store language hint on the Take if provided (Phase 8 API feature).
-    if language_hint:
-        take.language = language_hint.strip().lower()[:16]
-        take.save(update_fields=["language", "updated_at"])
+    # language_hint and initial_prompt are now stored by create_upload_take
 
     job = take.current_job
     logger.info(

@@ -211,7 +211,16 @@ def process_take(take: Take, worker_id: str = "pipeline") -> bool:
 
     # ── Stage 3: Transcribe (Faster-Whisper, NumPy path, beam=5) ───────
     try:
-        result = transcribe_audio(norm_path, beam_size=5)
+        # Per-take overrides: language_hint pins Whisper's LID, initial_prompt
+        # biases the decoder vocabulary. Empty strings fall back to settings,
+        # so an unset take behaves exactly as before.
+        take_language = take.language_hint.strip() or None
+        take_prompt = take.initial_prompt.strip() or None
+        result = transcribe_audio(
+            norm_path, beam_size=5,
+            language=take_language,
+            initial_prompt=take_prompt,
+        )
         n_wsp = persistence.save_whisper_transcript(
             take,
             result["language"],
