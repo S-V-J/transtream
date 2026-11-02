@@ -155,6 +155,8 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from guard_log_append_only import code_only
 
+AXES = 16
+
 
 class PatchError(Exception):
     """Any condition that makes the edit unsafe to apply. Raised before writing."""
@@ -503,11 +505,19 @@ def apply_file(path: pathlib.Path, edits: tuple, global_posts: tuple,
 
 # ─── invariant 5: observed refusing, on sixteen axes ────────────────────────
 
-def selftest() -> int:
+def selftest(skip: int | None = None) -> int:
     """Sixteen checks, each naming the class it exercises, so a future regression
     that blinds one axis says which. Several exist because that exact failure
     happened to this engine or to a caller of it - including axes 14 to 16, which
-    exist because the failure happened to the engine itself."""
+    exist because the failure happened to the engine itself.
+
+    When ``skip`` is given (1..16), that axis's body is replaced with a pass so
+    the run prints 15/16 and returns rc=1 - the skip simulation that proves the
+    harness can detect a missing axis rather than rubber-stamping itself green.
+    """
+    def _skip(n: int) -> bool:
+        return skip is not None and skip == n
+
     SRC = ('"""doc"""\n'
            'results = {}\n'
            'def run():\n'
@@ -531,212 +541,276 @@ def selftest() -> int:
 
     cases, fails = 0, 0
 
+    def _skip(n: int) -> bool:
+        return skip is not None and skip == n
+
+    SRC = ('"""doc"""\n'
+           'results = {}\n'
+           'def run():\n'
+           '    results["residual_s"] = round(1.0\n'
+           '                                  - 2.0, 3)\n'
+           '    print("bias runs AGAINST the effect")\n')
+
+    GOOD = (
+        dict(label="ast rewrite", kind="ast", container="results", key="residual_s",
+             new='    results["residual_s"] = 9.9',
+             lit=(), src_assert=('results["residual_s"] = 9.9',),
+             retired=('round(1.0',)),
+        dict(label="text rewrite", kind="text",
+             old='    print("bias runs AGAINST the effect")',
+             new='    print("bias runs FOR the effect")',
+             lit=("bias runs FOR the effect",), src_assert=(),
+             retired=("bias runs AGAINST",)),
+    )
+    GOOD_GLOBALS = (("bias runs AGAINST", 0), ("bias runs FOR the effect", 1),
+                    ('results["residual_s"] = 9.9', 1))
+
     # 1. acceptance: the good edits apply and satisfy every assertion.
-    try:
-        out = apply_text(SRC, GOOD, GOOD_GLOBALS)
-        assert 'results["residual_s"] = 9.9' in out and "AGAINST" not in out
-        cases += 1
-        print("  [1] acceptance                 -> applied, assertions hold  OK")
-    except PatchError as exc:
-        fails += 1
-        print(f"  [1] acceptance                 -> REFUSED WRONGLY: {exc}")
+    if _skip(1):
+        print("  [1] acceptance                         -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            out = apply_text(SRC, GOOD, GOOD_GLOBALS)
+            assert 'results["residual_s"] = 9.9' in out and "AGAINST" not in out
+            cases += 1
+            print("  [1] acceptance                         -> applied, assertions hold  OK")
+        except PatchError as exc:
+            fails += 1
+            print(f"  [1] acceptance                         -> REFUSED WRONGLY: {exc}")
 
     # 2. wrong anchor count must refuse (a text anchor that is absent).
-    try:
-        apply_text(SRC, (dict(label="ghost", kind="text", old="NOT IN FILE",
-                              new="x", lit=(), src_assert=(), retired=()),), ())
-        fails += 1
-        print("  [2] absent text anchor         -> APPLIED (must refuse)")
-    except PatchError:
-        cases += 1
-        print("  [2] absent text anchor         -> refused  OK")
+    if _skip(2):
+        print("  [2] absent text anchor                 -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(SRC, (dict(label="ghost", kind="text", old="NOT IN FILE",
+                                  new="x", lit=(), src_assert=(), retired=()),), ())
+            fails += 1
+            print("  [2] absent text anchor                 -> APPLIED (must refuse)")
+        except PatchError:
+            cases += 1
+            print("  [2] absent text anchor                 -> refused  OK")
 
     # 3. ambiguous ast anchor must refuse (two assigns to the same key).
-    AMBIG = SRC + 'results["residual_s"] = 1\n'
-    try:
-        apply_text(AMBIG, (dict(label="amb", kind="ast", container="results",
-                                key="residual_s", new="x", lit=(),
-                                src_assert=(), retired=()),), ())
-        fails += 1
-        print("  [3] ambiguous ast anchor       -> APPLIED (must refuse)")
-    except PatchError:
-        cases += 1
-        print("  [3] ambiguous ast anchor       -> refused  OK")
+    if _skip(3):
+        print("  [3] ambiguous ast anchor               -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            AMBIG = SRC + 'results["residual_s"] = 1\n'
+            apply_text(AMBIG, (dict(label="amb", kind="ast", container="results",
+                                    key="residual_s", new="x", lit=(),
+                                    src_assert=(), retired=()),), ())
+            fails += 1
+            print("  [3] ambiguous ast anchor               -> APPLIED (must refuse)")
+        except PatchError:
+            cases += 1
+            print("  [3] ambiguous ast anchor               -> refused  OK")
 
     # 4. concatenation BOUNDARY must be NAMED as such, not as a bare count.
-    BOUND = ('x = ("part one "\n'
-             '     "part two needle")\n')
-    try:
-        apply_text(BOUND, (dict(label="bnd", kind="text",
-                                old='x = ("part one "\n     "part two needle")',
-                                new='x = ("part one "\n     "part two needle")',
-                                lit=("one part two",), src_assert=(), retired=()),), ())
-        fails += 1
-        print("  [4] boundary needle            -> not detected (must refuse)")
-    except PatchError as exc:
-        if "BOUNDARY" in str(exc):
-            cases += 1
-            print("  [4] boundary needle            -> refused, named as BOUNDARY  OK")
-        else:
+    if _skip(4):
+        print("  [4] boundary needle                    -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            BOUND = ('x = ("part one "\n'
+                     '     "part two needle")\n')
+            apply_text(BOUND, (dict(label="bnd", kind="text",
+                                    old='x = ("part one "\n     "part two needle")',
+                                    new='x = ("part one "\n     "part two needle")',
+                                    lit=("one part two",), src_assert=(), retired=()),), ())
             fails += 1
-            print(f"  [4] boundary needle            -> refused but MISNAMED: {exc}")
+            print("  [4] boundary needle                    -> not detected (must refuse)")
+        except PatchError as exc:
+            if "BOUNDARY" in str(exc):
+                cases += 1
+                print("  [4] boundary needle                    -> refused, named as BOUNDARY  OK")
+            else:
+                fails += 1
+                print(f"  [4] boundary needle                    -> refused but MISNAMED: {exc}")
 
     # 5. WRAPPED needle (the 08:54:15 case) must be named as a WRAP, not an absence.
-    WRAP = 'x = """alpha beta\ngamma delta"""\n'
-    try:
-        apply_text(WRAP, (dict(label="wrap", kind="text",
-                               old='x = """alpha beta\ngamma delta"""',
-                               new='x = """alpha beta\ngamma delta"""',
-                               lit=("beta gamma",), src_assert=(), retired=()),), ())
-        fails += 1
-        print("  [5] wrapped needle             -> not detected (must refuse)")
-    except PatchError as exc:
-        if "WRAPPED" in str(exc):
-            cases += 1
-            print("  [5] wrapped needle             -> refused, named as WRAPPED  OK")
-        else:
+    if _skip(5):
+        print("  [5] wrapped needle                     -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            WRAP = 'x = """alpha beta\ngamma delta"""\n'
+            apply_text(WRAP, (dict(label="wrap", kind="text",
+                                   old='x = """alpha beta\ngamma delta"""',
+                                   new='x = """alpha beta\ngamma delta"""',
+                                   lit=("beta gamma",), src_assert=(), retired=()),), ())
             fails += 1
-            print(f"  [5] wrapped needle             -> refused but MISNAMED: {exc}")
+            print("  [5] wrapped needle                     -> not detected (must refuse)")
+        except PatchError as exc:
+            if "WRAPPED" in str(exc):
+                cases += 1
+                print("  [5] wrapped needle                     -> refused, named as WRAPPED  OK")
+            else:
+                fails += 1
+                print(f"  [5] wrapped needle                     -> refused but MISNAMED: {exc}")
 
     # 6. control: a CONTIGUOUS needle in the SAME wrapped source must be accepted,
     #    so axis 5 is not a blanket refusal of anything near a line break.
-    try:
-        apply_text(WRAP, (dict(label="ok", kind="text",
-                               old='x = """alpha beta\ngamma delta"""',
-                               new='x = """alpha beta\ngamma delta"""',
-                               lit=("alpha beta",), src_assert=(), retired=()),), ())
-        cases += 1
-        print("  [6] contiguous in wrapped src  -> accepted  OK")
-    except PatchError as exc:
-        fails += 1
-        print(f"  [6] contiguous in wrapped src  -> REFUSED WRONGLY: {exc}")
+    if _skip(6):
+        print("  [6] contiguous in wrapped src          -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(WRAP, (dict(label="ok", kind="text",
+                                   old='x = """alpha beta\ngamma delta"""',
+                                   new='x = """alpha beta\ngamma delta"""',
+                                   lit=("alpha beta",), src_assert=(), retired=()),), ())
+            cases += 1
+            print("  [6] contiguous in wrapped src          -> accepted  OK")
+        except PatchError as exc:
+            fails += 1
+            print(f"  [6] contiguous in wrapped src          -> REFUSED WRONGLY: {exc}")
 
     # 7. overlapping edits must refuse (ambiguous intent), not double-splice.
-    try:
-        apply_text(SRC, (
-            dict(label="t", kind="text", old='results["residual_s"] = round(1.0',
-                 new='results["residual_s"] = round(2.0', lit=(), src_assert=(),
-                 retired=()),
-            dict(label="a", kind="ast", container="results", key="residual_s",
-                 new='results["residual_s"] = 5', lit=(), src_assert=(), retired=()),
-        ), ())
-        fails += 1
-        print("  [7] overlapping edits          -> APPLIED (must refuse)")
-    except PatchError as exc:
-        if "overlap" in str(exc):
-            cases += 1
-            print("  [7] overlapping edits          -> refused, named as overlap  OK")
-        else:
+    if _skip(7):
+        print("  [7] overlapping edits                  -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(SRC, (
+                dict(label="t", kind="text", old='results["residual_s"] = round(1.0',
+                     new='results["residual_s"] = round(2.0', lit=(), src_assert=(),
+                     retired=()),
+                dict(label="a", kind="ast", container="results", key="residual_s",
+                     new='results["residual_s"] = 5', lit=(), src_assert=(), retired=()),
+            ), ())
             fails += 1
-            print(f"  [7] overlapping edits          -> refused but MISNAMED: {exc}")
+            print("  [7] overlapping edits                  -> APPLIED (must refuse)")
+        except PatchError as exc:
+            if "overlap" in str(exc):
+                cases += 1
+                print("  [7] overlapping edits                  -> refused, named as overlap  OK")
+            else:
+                fails += 1
+                print(f"  [7] overlapping edits                  -> refused but MISNAMED: {exc}")
 
     # 8. THE v1 STALE-SPAN REGRESSION: an ast edit placed AFTER a length-changing
     #    text edit must still splice at the right place. v1 computed the ast span
     #    against the original text but spliced in list order, so it would have
     #    corrupted this. Every debt caller (models/pipeline/recovery/README) is at
     #    risk of exactly this shape, which is why it is an axis and not a footnote.
-    SRC9 = 'a = 1\nresults = {}\nresults["k"] = 0\n'
-    try:
-        out9 = apply_text(SRC9, (
-            dict(label="text-first", kind="text", old="a = 1", new="aaaa = 1111",
-                 lit=(), src_assert=("aaaa = 1111",), retired=()),
-            dict(label="ast-second", kind="ast", container="results", key="k",
-                 new='results["k"] = 42', lit=(),
-                 src_assert=('results["k"] = 42',), retired=('results["k"] = 0',)),
-        ), ())
-        ok9 = ('results["k"] = 42' in out9 and 'aaaa = 1111' in out9
-               and 'results = {}' in out9 and 'results["k"] = 0' not in out9)
-        if ok9:
-            cases += 1
-            print("  [8] ast edit after text edit   -> spliced correctly (v1 bug fixed)  OK")
-        else:
+    if _skip(8):
+        print("  [8] ast edit after text edit           -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            SRC9 = 'a = 1\nresults = {}\nresults["k"] = 0\n'
+            out9 = apply_text(SRC9, (
+                dict(label="text-first", kind="text", old="a = 1", new="aaaa = 1111",
+                     lit=(), src_assert=("aaaa = 1111",), retired=()),
+                dict(label="ast-second", kind="ast", container="results", key="k",
+                     new='results["k"] = 42', lit=(),
+                     src_assert=('results["k"] = 42',), retired=('results["k"] = 0',)),
+            ), ())
+            ok9 = ('results["k"] = 42' in out9 and 'aaaa = 1111' in out9
+                   and 'results = {}' in out9 and 'results["k"] = 0' not in out9)
+            if ok9:
+                cases += 1
+                print("  [8] ast edit after text edit           -> spliced correctly (v1 bug fixed)  OK")
+            else:
+                fails += 1
+                print(f"  [8] ast edit after text edit           -> CORRUPTED: {out9!r}")
+        except PatchError as exc:
             fails += 1
-            print(f"  [8] ast edit after text edit   -> CORRUPTED: {out9!r}")
-    except PatchError as exc:
-        fails += 1
-        print(f"  [8] ast edit after text edit   -> refused WRONGLY: {exc}")
+            print(f"  [8] ast edit after text edit           -> refused WRONGLY: {exc}")
 
     # 9. a retired needle containing a newline must be rejected on principle.
-    try:
-        apply_text(SRC, (dict(label="rn", kind="text",
-                              old='    print("bias runs AGAINST the effect")',
-                              new='    print("x")',
-                              lit=(), src_assert=(),
-                              retired=("bias runs AGAINST\nthe effect",)),), ())
-        fails += 1
-        print("  [9] retired needle w/ newline   -> APPLIED (must refuse)")
-    except PatchError as exc:
-        if "CONTAINS A NEWLINE" in str(exc):
-            cases += 1
-            print("  [9] retired needle w/ newline   -> refused, named  OK")
-        else:
+    if _skip(9):
+        print("  [9] retired needle w/ newline          -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(SRC, (dict(label="rn", kind="text",
+                                  old='    print("bias runs AGAINST the effect")',
+                                  new='    print("x")',
+                                  lit=(), src_assert=(),
+                                  retired=("bias runs AGAINST\nthe effect",)),), ())
             fails += 1
-            print(f"  [9] retired needle w/ newline   -> refused but MISNAMED: {exc}")
+            print("  [9] retired needle w/ newline          -> APPLIED (must refuse)")
+        except PatchError as exc:
+            if "CONTAINS A NEWLINE" in str(exc):
+                cases += 1
+                print("  [9] retired needle w/ newline          -> refused, named  OK")
+            else:
+                fails += 1
+                print(f"  [9] retired needle w/ newline          -> refused but MISNAMED: {exc}")
 
     # 10. a retired string still present must refuse.
-    try:
-        apply_text(SRC, (dict(label="ret", kind="text",
-                              old='    print("bias runs AGAINST the effect")',
-                              new='    print("bias runs AGAINST the effect")',
-                              lit=(), src_assert=(), retired=("bias runs AGAINST",)),), ())
-        fails += 1
-        print("  [10] retired string present     -> APPLIED (must refuse)")
-    except PatchError:
-        cases += 1
-        print("  [10] retired string present     -> refused  OK")
+    if _skip(10):
+        print("  [10] retired string present            -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(SRC, (dict(label="ret", kind="text",
+                                  old='    print("bias runs AGAINST the effect")',
+                                  new='    print("bias runs AGAINST the effect")',
+                                  lit=(), src_assert=(), retired=("bias runs AGAINST",)),), ())
+            fails += 1
+            print("  [10] retired string present            -> APPLIED (must refuse)")
+        except PatchError:
+            cases += 1
+            print("  [10] retired string present            -> refused  OK")
 
     # 11. lint must collect MORE THAN ONE violation in a single pass - the whole
     #     point of axis 11 is that P2's four data defects were masked to one by
     #     short-circuiting. Here a wrap lit AND an absent global, both reported.
-    viols = lint(WRAP, (dict(label="w", kind="text",
-                             old='x = """alpha beta\ngamma delta"""',
-                             new='x = """alpha beta\ngamma delta"""',
-                             lit=("beta gamma",), src_assert=(), retired=()),),
-                 (("this global is absent", 1),))
-    if len(viols) >= 2 and any("WRAPPED" in v for v in viols) \
-            and any("global" in v for v in viols):
-        cases += 1
-        print(f"  [11] lint collects all          -> {len(viols)} violations in one pass  OK")
+    if _skip(11):
+        print("  [11] lint collects all                 -> SKIPPED (simulated missing axis)")
     else:
-        fails += 1
-        print(f"  [11] lint collects all          -> only {viols} (must list >=2, no short-circuit)")
+        viols = lint(WRAP, (dict(label="w", kind="text",
+                                 old='x = """alpha beta\ngamma delta"""',
+                                 new='x = """alpha beta\ngamma delta"""',
+                                 lit=("beta gamma",), src_assert=(), retired=()),),
+                     (("this global is absent", 1),))
+        if len(viols) >= 2 and any("WRAPPED" in v for v in viols) \
+                and any("global" in v for v in viols):
+            cases += 1
+            print(f"  [11] lint collects all                 -> {len(viols)} violations in one pass  OK")
+        else:
+            fails += 1
+            print(f"  [11] lint collects all                 -> only {viols} (must list >=2, no short-circuit)")
 
     # 12. the runnable_jobs() class, made mechanical: a needle that lives in a
     #     docstring AND in code must FAIL a raw presence-exactly-one global and
     #     PASS the same global in "code" mode. This is the D-c mirror that bit
     #     APPLY2 at 09:11:02; v3 turns "narrow the needle by hand" into a kind.
-    PROSE_AND_CODE = ('"""the queue uses runnable_jobs() - the ONE predicate"""\n'
-                      'def q():\n    return runnable_jobs().count()\n')
-    raw_v = lint(PROSE_AND_CODE, (), (("runnable_jobs()", 1),))
-    code_v = lint(PROSE_AND_CODE, (), (("runnable_jobs()", 1, "code"),))
-    if raw_v and not code_v:
-        cases += 1
-        print("  [12] code= global vs raw      -> raw refused (prose), code accepted  OK")
+    if _skip(12):
+        print("  [12] code= global vs raw               -> SKIPPED (simulated missing axis)")
     else:
-        fails += 1
-        print(f"  [12] code= global vs raw      -> raw={raw_v} code={code_v} (raw must refuse, code must pass)")
+        PROSE_AND_CODE = ('"""the queue uses runnable_jobs() - the ONE predicate"""\n'
+                          'def q():\n    return runnable_jobs().count()\n')
+        raw_v = lint(PROSE_AND_CODE, (), (("runnable_jobs()", 1),))
+        code_v = lint(PROSE_AND_CODE, (), (("runnable_jobs()", 1, "code"),))
+        if raw_v and not code_v:
+            cases += 1
+            print("  [12] code= global vs raw               -> raw refused (prose), code accepted  OK")
+        else:
+            fails += 1
+            print(f"  [12] code= global vs raw               -> raw={raw_v} code={code_v} "
+                  f"(raw must refuse, code must pass)")
 
     # 13. write-last: a failing global must leave a real file byte-identical.
-    import tempfile, os
-    fd, tmp = tempfile.mkstemp(suffix=".py")
-    os.close(fd)
-    try:
-        pathlib.Path(tmp).write_text(SRC)
-        before = pathlib.Path(tmp).read_bytes()
+    if _skip(13):
+        print("  [13] failing global                    -> SKIPPED (simulated missing axis)")
+    else:
+        import tempfile, os
+        fd, tmp = tempfile.mkstemp(suffix=".py")
+        os.close(fd)
         try:
-            apply_file(pathlib.Path(tmp), GOOD, (("this string does not exist", 99),))
-            fails += 1
-            print("  [13] failing global             -> WROTE (must not)")
-        except PatchError:
-            after = pathlib.Path(tmp).read_bytes()
-            if after == before:
-                cases += 1
-                print("  [13] failing global             -> file untouched  OK")
-            else:
+            pathlib.Path(tmp).write_text(SRC)
+            before = pathlib.Path(tmp).read_bytes()
+            try:
+                apply_file(pathlib.Path(tmp), GOOD, (("this string does not exist", 99),))
                 fails += 1
-                print("  [13] failing global             -> file CHANGED despite refusal")
-    finally:
-        os.unlink(tmp)
+                print("  [13] failing global                    -> WROTE (must not)")
+            except PatchError:
+                after = pathlib.Path(tmp).read_bytes()
+                if after == before:
+                    cases += 1
+                    print("  [13] failing global                    -> file untouched  OK")
+                else:
+                    fails += 1
+                    print("  [13] failing global                    -> file CHANGED despite refusal")
+        finally:
+            os.unlink(tmp)
 
     # 14. A NON-PYTHON SOURCE with a text edit and raw-count globals must apply.
     #     This is the 14:48:05 case, and it is the reason the python flag exists:
@@ -746,52 +820,58 @@ def selftest() -> int:
     #     (invariant 4 held under the crash) but the engine could not say why. A
     #     text anchor and a raw count need no parser, so declaring python=False
     #     must let them through - and must not lose a byte of the rest of the file.
-    HTML = ('<div id="a">\n'
-            '  <span class="t" x-text="seg.text"></span>\n'
-            '</div>\n'
-            '\U0001f4c2 Open File System\n')
-    try:
-        out14 = apply_text(HTML, (dict(label="html", kind="text",
-                                       old='  <span class="t" x-text="seg.text"></span>',
-                                       new='  <span class="t" x-text="seg.text"\n'
-                                           '        :class="on ? \'big\' : \'\'"></span>',
-                                       lit=(), src_assert=(), retired=()),),
-                           ((':class="on ?', 1), ('x-text="seg.text"', 1)),
-                           python=False)
-        if ':class="on ?' in out14 and '\U0001f4c2' in out14 and '<div id="a">' in out14:
-            cases += 1
-            print("  [14] non-Python + text edit   -> applied, no parse attempted  OK")
-        else:
+    if _skip(14):
+        print("  [14] non-Python + text edit            -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            HTML = ('<div id="a">\n'
+                    '  <span class="t" x-text="seg.text"></span>\n'
+                    '</div>\n'
+                    '\U0001f4c2 Open File System\n')
+            out14 = apply_text(HTML, (dict(label="html", kind="text",
+                                           old='  <span class="t" x-text="seg.text"></span>',
+                                           new='  <span class="t" x-text="seg.text"\n'
+                                               '        :class="on ? \'big\' : \'\'"></span>',
+                                           lit=(), src_assert=(), retired=()),),
+                               ((':class="on ?', 1), ('x-text="seg.text"', 1)),
+                               python=False)
+            if ':class="on ?' in out14 and '\U0001f4c2' in out14 and '<div id="a">' in out14:
+                cases += 1
+                print("  [14] non-Python + text edit            -> applied, no parse attempted  OK")
+            else:
+                fails += 1
+                print(f"  [14] non-Python + text edit            -> LOST CONTENT: {out14!r}")
+        except PatchError as exc:
             fails += 1
-            print(f"  [14] non-Python + text edit   -> LOST CONTENT: {out14!r}")
-    except PatchError as exc:
-        fails += 1
-        print(f"  [14] non-Python + text edit   -> REFUSED WRONGLY: {exc}")
-    except SyntaxError as exc:
-        fails += 1
-        print(f"  [14] non-Python + text edit   -> TRACEBACK, not a refusal: {exc}")
+            print(f"  [14] non-Python + text edit            -> REFUSED WRONGLY: {exc}")
+        except SyntaxError as exc:
+            fails += 1
+            print(f"  [14] non-Python + text edit            -> TRACEBACK, not a refusal: {exc}")
 
     # 15. A lit needle requested under python=False must be NAMED as misuse, not
     #     raised. The caller declared the source is not Python and then asked for a
     #     diagnostic that can only run on Python; that is a contradiction in the
     #     caller's data, and contradictions get a sentence.
-    try:
-        apply_text(HTML, (dict(label="misuse", kind="text",
-                               old='<div id="a">', new='<div id="a">',
-                               lit=("seg.text",), src_assert=(), retired=()),),
-                   (), python=False)
-        fails += 1
-        print("  [15] lit on non-Python        -> APPLIED (must refuse)")
-    except PatchError as exc:
-        if "python=False" in str(exc):
-            cases += 1
-            print("  [15] lit on non-Python        -> refused, named  OK")
-        else:
+    if _skip(15):
+        print("  [15] lit on non-Python                 -> SKIPPED (simulated missing axis)")
+    else:
+        try:
+            apply_text(HTML, (dict(label="misuse", kind="text",
+                                   old='<div id="a">', new='<div id="a">',
+                                   lit=("seg.text",), src_assert=(), retired=()),),
+                       (), python=False)
             fails += 1
-            print(f"  [15] lit on non-Python        -> refused but MISNAMED: {exc}")
-    except SyntaxError as exc:
-        fails += 1
-        print(f"  [15] lit on non-Python        -> TRACEBACK, not a refusal: {exc}")
+            print("  [15] lit on non-Python                 -> APPLIED (must refuse)")
+        except PatchError as exc:
+            if "python=False" in str(exc):
+                cases += 1
+                print("  [15] lit on non-Python                 -> refused, named  OK")
+            else:
+                fails += 1
+                print(f"  [15] lit on non-Python                 -> refused but MISNAMED: {exc}")
+        except SyntaxError as exc:
+            fails += 1
+            print(f"  [15] lit on non-Python                 -> TRACEBACK, not a refusal: {exc}")
 
     # 16. THE ACTUAL 14:48:05 REPRODUCTION, ON THE DEFAULT PATH. python=True on a
     #     non-Python source must refuse with a named sentence rather than raise
@@ -800,19 +880,22 @@ def selftest() -> int:
     #     is the likely human error, and it must produce a sentence, not a traceback
     #     that escapes the caller's except PatchError and leaves the caller guessing
     #     whether the file was written.
-    viols16 = lint(HTML, (dict(label="forgot", kind="text",
-                               old='<div id="a">', new='<div id="b">',
-                               lit=(), src_assert=(), retired=()),), ())
-    if viols16 and any("python=False" in v for v in viols16):
-        cases += 1
-        print("  [16] undeclared non-Python    -> refused, named (no traceback)  OK")
+    if _skip(16):
+        print("  [16] undeclared non-Python             -> SKIPPED (simulated missing axis)")
     else:
-        fails += 1
-        print(f"  [16] undeclared non-Python    -> {viols16!r} (must name the parse failure "
-              f"and point at python=False)")
+        viols16 = lint(HTML, (dict(label="forgot", kind="text",
+                                   old='<div id="a">', new='<div id="b">',
+                                   lit=(), src_assert=(), retired=()),), ())
+        if viols16 and any("python=False" in v for v in viols16):
+            cases += 1
+            print("  [16] undeclared non-Python             -> refused, named (no traceback)  OK")
+        else:
+            fails += 1
+            print(f"  [16] undeclared non-Python             -> {viols16!r} (must name the parse "
+                  f"failure and point at python=False)")
 
     print(f"  selftest: {cases}/16 checks exercised, {fails} failure(s)")
-    if fails:
+    if cases != AXES:
         print("SELFTEST FAIL - patchkit cannot be trusted to edit a real file")
         return 1
     print("SELFTEST PASS - applies good edits; refuses absent/ambiguous/overlapping "
@@ -824,16 +907,18 @@ def selftest() -> int:
           "python=False; and refuses a parse it cannot perform with a sentence "
           "instead of a traceback, on the default path as well as the declared one. "
           "Certified on sixteen axes before it touches the debt files.")
-    return 16 - 16  # 0 on success; the arithmetic is deliberate, not a literal
+    return 16 - cases  # 0 when all pass; >0 when skipped/tampered
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true",
                     help="prove the engine can refuse, on sixteen checks, before use")
+    ap.add_argument("--skip-one", type=int, metavar="N",
+                    help="skip axis N (1..16) to prove rc=1 with 15/16 on a tampered run")
     args = ap.parse_args()
     if args.selftest:
-        return selftest()
+        return selftest(skip=args.skip_one)
     print("patchkit is a library; call lint() then apply_file() from a caller that "
           "supplies edits as data. Pass python=False for HTML, Markdown or dotenv. "
           "Run --selftest first.")
