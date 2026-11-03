@@ -29,7 +29,7 @@ burned by their absence:
 | Root | `/home/ML/transtream` (WSL, host `LAPTOP-B4UTDP8Q`) | every prompt |
 | Interpreter | Python 3.14, venv at `./venv` | `VENV_OK: /home/ML/transtream/venv` |
 | Remote | `github.com:S-V-J/transtream`, branch `main` | `git ls-remote` |
-| HEAD | `aea9a07`, == `origin/main`, tree clean | this turn |
+| HEAD | `b9e51d5`, == `origin/main`, tree clean | this turn |
 | Server | Daphne on `127.0.0.1:8003`, port in `logs/transtream.port` | README, CLI |
 | Model | `Systran/faster-whisper-tiny`, CPU, `int8`, HF cache only | `settings.py`, `.env.example:29` |
 | VAD | Silero, `VAD_THRESHOLD=0.5`, `MIN_SILENCE_MS=500`, `SPEECH_PAD_MS=30` | `.env.example:14-16` |
@@ -54,7 +54,7 @@ live this week: `chunks sent/received 521/521` on a completed take (equal, no lo
 VAD-segment count and Whisper-segment count are **different stages, not a bug** —
 VAD found 7 regions on 05eb0713 and Whisper merged them into 16 utterances.
 
-### 2.2 This session (commits 34bc087 → aea9a07)
+### 2.2 This session (commits 34bc087 → b9e51d5)
 | Commit | What | Witness |
 |---|---|---|
 | `806b11d` | 12 env reads wired into `settings.py`; `WHISPER_LANGUAGE` pin added | defaults copied from the services' own `getattr` fallbacks, so wiring changed nothing for anyone who sets nothing |
@@ -63,6 +63,10 @@ VAD found 7 regions on 05eb0713 and Whisper merged them into 16 utterances.
 | `ff613d6` | the inverted dependency arrow repaired; the witness paragraph completed with its measured cost | `settings.py:215-225` read back on disk |
 | `1cfe0f7` | patchkit: the `python=` declaration, 13 → 16 axes | **see §4 — its message overclaims** |
 | `aea9a07` | native-script toggle functional at both render sites | **see §4 — its message claims an unrun browser check** |
+| `cd48229` | forward-repair two false pushed claims (§4.1, §4.2) | prose-only commit; messages generated from this session's output |
+| `83a8490` | unify mic & upload transcription + translation in same window | removed tabbed view; both sources render in shared results area |
+| `ab4870f` | auto-transcribe uploads; remove "Transcribe Only" button | `setUploadFile()` → `startUpload()`; unified window shows results |
+| `b9e51d5` | advanced transcription display with speaker diarization UI | 3 view modes, timestamp toggle, heuristic speakers, filter chips, copy, .srt export |
 
 ### 2.3 Instruments built or repaired
 - **patchkit v1→v4** — anchored edits, order-independent descending splice,
