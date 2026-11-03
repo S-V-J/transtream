@@ -603,11 +603,6 @@
 
       <!-- Actions -->
       <div class="mt-3 flex flex-wrap gap-2">
-        <button type="button" @click="startUpload()"
-                :disabled="!upload.file || upload.uploading || upload.polling"
-                class="rounded-xl bg-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-cyan-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
-          Transcribe Only
-        </button>
         <button type="button" @click="clearUpload()"
                 class="rounded-xl bg-slate-700 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-600">
           Clear

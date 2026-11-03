@@ -529,6 +529,8 @@ document.addEventListener('alpine:init', () => {
       u.translationSource = '';
       u.translationLoading = false;
       u.translationError = '';
+      // Auto-start upload & transcription — no "Transcribe Only" button needed.
+      this.startUpload();
     },
 
     clearUpload() {
