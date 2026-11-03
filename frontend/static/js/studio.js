@@ -66,6 +66,13 @@ document.addEventListener('alpine:init', () => {
     micTranslationText: '',
     micTranslationSource: '',
     ttsPlaying: false,
+    micTranslationExpanded: false,
+
+    // ── Advanced transcription display state ──
+    transcriptView: 'subtitle',   // 'subtitle' | 'timestamp' | 'compact'
+    showTimestamps: true,
+    activeSpeaker: '',
+    uploadTranslationExpanded: false,
 
     // ── counters ─
     chunksSent: 0,
@@ -361,6 +368,7 @@ document.addEventListener('alpine:init', () => {
           this.transcribing = true; this.transcriptSegments = [];
           this.languageDetected = ''; this.languageProbability = 0;
           this.transcribeMessage = msg.message || 'Transcribing\u2026';
+          this._micSpeakers = null;  // clear cached speaker labels
           break;
 
         case 'transcribing_complete':
@@ -541,6 +549,7 @@ document.addEventListener('alpine:init', () => {
       u.jobId = null; u.takeId = null;
       u.state = ''; u.pct = 0; u.error = null; u.code = '';
       u.segments = []; u.language = ''; u.languageProbability = 0; u.durationMs = 0;
+      this._uploadSpeakers = null;
       u.translationTarget = 'en';
       u.translationText = '';
       u.translationSource = '';
@@ -687,6 +696,7 @@ document.addEventListener('alpine:init', () => {
         u.language = d.language ? String(d.language).toUpperCase() : '';
         u.languageProbability = d.language_probability || 0;
         u.durationMs = d.duration_ms || 0;
+        this._uploadSpeakers = null;  // clear cached speaker labels
       } catch (err) {
         u.error = 'Transcript fetch failed: ' + this._errMessage(err);
       }
@@ -778,6 +788,106 @@ document.addEventListener('alpine:init', () => {
         try { this._ttsAudioContext.close(); } catch (e) { /* ignore */ }
         this._ttsAudioContext = null;
       }
+    },
+
+    // ── Advanced transcription display helpers ─────────────────────────
+
+    // Heuristic speaker diarization: when consecutive Whisper segments are
+    // separated by a silence gap longer than 1.5 s, treat them as a different
+    // speaker. Alternates between "Speaker 1" / "Speaker 2" / ... . Falls back
+    // to seg.speaker_id if the backend ever emits one.
+    _speakerLabels(segs) {
+      const labels = {};
+      let current = 1;
+      let lastEnd = null;
+      for (const s of segs || []) {
+        if (s.speaker_id) {
+          labels[s.index] = s.speaker_id;
+        } else if (lastEnd !== null && s.start_ms - lastEnd > 1500) {
+          current += 1;
+          labels[s.index] = 'Speaker ' + current;
+        } else {
+          labels[s.index] = 'Speaker ' + current;
+        }
+        lastEnd = s.end_ms;
+      }
+      return labels;
+    },
+
+    getSpeaker(index) {
+      if (!this._micSpeakers) this._micSpeakers = this._speakerLabels(this.transcriptSegments);
+      return this._micSpeakers[index] || 'Speaker 1';
+    },
+
+    getUploadSpeaker(index) {
+      if (!this._uploadSpeakers) this._uploadSpeakers = this._speakerLabels(this.upload.segments);
+      return this._uploadSpeakers[index] || 'Speaker 1';
+    },
+
+    speakerColor(speaker) {
+      // Deterministic color per speaker so the same speaker always matches.
+      const colors = ['bg-indigo-500/20 text-indigo-300', 'bg-cyan-500/20 text-cyan-300',
+                      'bg-emerald-500/20 text-emerald-300', 'bg-rose-500/20 text-rose-300',
+                      'bg-amber-500/20 text-amber-300', 'bg-purple-500/20 text-purple-300'];
+      let hash = 0;
+      for (let i = 0; i < speaker.length; i++) {
+        hash = ((hash << 5) - hash) + speaker.charCodeAt(i);
+        hash = hash & hash;
+      }
+      return colors[Math.abs(hash) % colors.length];
+    },
+
+    speakerColorClass(speaker) {
+      return this.speakerColor(speaker);
+    },
+
+    speakerList() {
+      const set = new Set();
+      for (const s of this.transcriptSegments || []) set.add(this.getSpeaker(s.index));
+      return Array.from(set).sort();
+    },
+
+    uploadSpeakerList() {
+      const set = new Set();
+      for (const s of this.upload.segments || []) set.add(this.getUploadSpeaker(s.index));
+      return Array.from(set).sort();
+    },
+
+    filteredMicSegments() {
+      if (!this.activeSpeaker) return this.transcriptSegments;
+      return this.transcriptSegments.filter(s => this.getSpeaker(s.index) === this.activeSpeaker);
+    },
+
+    filteredUploadSegments() {
+      if (!this.activeSpeaker) return this.upload.segments;
+      return this.upload.segments.filter(s => this.getUploadSpeaker(s.index) === this.activeSpeaker);
+    },
+
+    toggleTranslationExpand(source) {
+      if (source === 'mic') this.micTranslationExpanded = !this.micTranslationExpanded;
+      else this.uploadTranslationExpanded = !this.uploadTranslationExpanded;
+    },
+
+    copyTranscript() {
+      const lines = this.transcriptSegments.map(s => {
+        const t = this.fmtSegTime(s.start_ms) + ' → ' + this.fmtSegTime(s.end_ms);
+        return this.showTimestamps ? '[' + t + '] ' + s.text : s.text;
+      }).join('\n');
+      navigator.clipboard.writeText(lines).then(() => {
+        const btn = event && event.currentTarget;
+        if (btn) { const old = btn.innerHTML; btn.innerHTML = '✓ Copied'; setTimeout(() => { btn.innerHTML = old; }, 1200); }
+      });
+    },
+
+    copyUploadTranscript() {
+      const lines = this.upload.segments.map(s => {
+        const t = this.fmtSegTime(s.start_ms) + ' → ' + this.fmtSegTime(s.end_ms);
+        return this.showTimestamps ? '[' + t + '] ' + s.text : s.text;
+      }).join('\n');
+      navigator.clipboard.writeText(lines).then(() => {
+        const btn = event && event.currentTarget;
+        if (btn) { const old = btn.innerHTML; btn.innerHTML = '✓ Copied'; setTimeout(() => { btn.innerHTML = old; }, 1200); }
+      });
     },
 
     uploadStatusLabel() {
